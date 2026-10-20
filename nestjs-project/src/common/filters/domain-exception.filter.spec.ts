@@ -5,8 +5,13 @@ import {
   EmailNotConfirmedException,
   InvalidCredentialsException,
   InvalidTokenException,
+  InvalidUploadPartsException,
+  InvalidVideoStateException,
   TokenExpiredException,
   TokenReuseDetectedException,
+  UploadSizeExceededException,
+  UploadVerificationFailedException,
+  VideoNotFoundException,
 } from '../exceptions/domain.exception';
 
 describe('DomainExceptionFilter', () => {
@@ -27,8 +32,8 @@ describe('DomainExceptionFilter', () => {
       }),
       getArgs: () => [],
       getArgByIndex: () => null,
-      switchToRpc: () => ({}) as any,
-      switchToWs: () => ({}) as any,
+      switchToRpc: () => ({}),
+      switchToWs: () => ({}),
       getType: () => 'http',
     } as unknown as ArgumentsHost;
   });
@@ -51,7 +56,7 @@ describe('DomainExceptionFilter', () => {
     expect(mockJson).toHaveBeenCalledWith({
       statusCode: 401,
       error: 'INVALID_CREDENTIALS',
-      message: expect.any(String),
+      message: expect.any(String) as string,
     });
   });
 
@@ -62,7 +67,7 @@ describe('DomainExceptionFilter', () => {
     expect(mockJson).toHaveBeenCalledWith({
       statusCode: 403,
       error: 'EMAIL_NOT_CONFIRMED',
-      message: expect.any(String),
+      message: expect.any(String) as string,
     });
   });
 
@@ -73,7 +78,7 @@ describe('DomainExceptionFilter', () => {
     expect(mockJson).toHaveBeenCalledWith({
       statusCode: 401,
       error: 'INVALID_TOKEN',
-      message: expect.any(String),
+      message: expect.any(String) as string,
     });
   });
 
@@ -84,7 +89,7 @@ describe('DomainExceptionFilter', () => {
     expect(mockJson).toHaveBeenCalledWith({
       statusCode: 401,
       error: 'TOKEN_EXPIRED',
-      message: expect.any(String),
+      message: expect.any(String) as string,
     });
   });
 
@@ -95,7 +100,62 @@ describe('DomainExceptionFilter', () => {
     expect(mockJson).toHaveBeenCalledWith({
       statusCode: 401,
       error: 'TOKEN_REUSE_DETECTED',
-      message: expect.any(String),
+      message: expect.any(String) as string,
+    });
+  });
+
+  it('maps VideoNotFoundException to 404 with VIDEO_NOT_FOUND', () => {
+    filter.catch(new VideoNotFoundException(), mockHost);
+
+    expect(mockStatus).toHaveBeenCalledWith(404);
+    expect(mockJson).toHaveBeenCalledWith({
+      statusCode: 404,
+      error: 'VIDEO_NOT_FOUND',
+      message: 'Video not found',
+    });
+  });
+
+  it('maps InvalidVideoStateException to 409 with INVALID_VIDEO_STATE', () => {
+    filter.catch(new InvalidVideoStateException(), mockHost);
+
+    expect(mockStatus).toHaveBeenCalledWith(409);
+    expect(mockJson).toHaveBeenCalledWith({
+      statusCode: 409,
+      error: 'INVALID_VIDEO_STATE',
+      message: 'Video is not in a valid state for this operation',
+    });
+  });
+
+  it('maps InvalidUploadPartsException to 422 with INVALID_UPLOAD_PARTS', () => {
+    filter.catch(new InvalidUploadPartsException(), mockHost);
+
+    expect(mockStatus).toHaveBeenCalledWith(422);
+    expect(mockJson).toHaveBeenCalledWith({
+      statusCode: 422,
+      error: 'INVALID_UPLOAD_PARTS',
+      message: 'Upload parts list is invalid',
+    });
+  });
+
+  it('maps UploadVerificationFailedException to 422 with UPLOAD_VERIFICATION_FAILED', () => {
+    filter.catch(new UploadVerificationFailedException(), mockHost);
+
+    expect(mockStatus).toHaveBeenCalledWith(422);
+    expect(mockJson).toHaveBeenCalledWith({
+      statusCode: 422,
+      error: 'UPLOAD_VERIFICATION_FAILED',
+      message: 'Uploaded file does not match the declared size',
+    });
+  });
+
+  it('maps UploadSizeExceededException to 400 with VALIDATION_ERROR and the configured max', () => {
+    filter.catch(new UploadSizeExceededException(10737418240), mockHost);
+
+    expect(mockStatus).toHaveBeenCalledWith(400);
+    expect(mockJson).toHaveBeenCalledWith({
+      statusCode: 400,
+      error: 'VALIDATION_ERROR',
+      message: 'size must not be greater than 10737418240 bytes',
     });
   });
 });

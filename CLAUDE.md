@@ -8,11 +8,11 @@ More info in the project overview: [docs/project-plan.md](docs/project-plan.md)
 
 ## Repository Structure
 
-This is a monorepo with two main areas:
+This is a monorepo with three main areas:
 
-- `nestjs-project/` — Backend API (NestJS 11, TypeScript, Express). Contains modules for users, channels, videos, comments, etc.
+- `nestjs-project/` — Backend API (NestJS 11, TypeScript, Express). Contains the `auth`, `users`, `channels`, `mail`, `videos`, `storage`, `video-processing` and `core` modules.
 - `docs/` — Project documentation, architecture diagrams, and planning.
-- `next-frontend/` (Next.js) — not yet initialized
+- `next-frontend/` — Frontend (Next.js, BFF); see `next-frontend/CLAUDE.md`.
 
 ## Architecture (C4 Container Diagram)
 
@@ -23,8 +23,23 @@ See `docs/diagrams/software-arch.mermaid` for the full diagram. Key containers:
 - **Video Worker** (FFmpeg) → consumes jobs from queue, processes videos, updates DB and storage
 - **Database** (PostgreSQL) → users, channels, videos, comments, likes
 - **Object Storage** (S3/MinIO) → video files and thumbnails
-- **Message Queue** (TBD) → video processing job queue
+- **Message Queue** (BullMQ on Redis) → video processing job queue
 - **Email Service** (SMTP) → account confirmation and password recovery
+
+## Videos
+
+Implemented in `nestjs-project/src/videos/` (HTTP + domain), `src/storage/` (S3 client for MinIO) and `src/video-processing/` (queue producer, consumer and FFmpeg wrapper). All routes require the access token.
+
+- **Upload (multipart presigned, straight to MinIO):** the API never receives the video bytes.
+  - `POST /videos` (201) — init: creates the `draft` row, starts the S3 multipart upload and returns one presigned `PUT` URL per part.
+  - `GET /videos/:publicId/upload` (200) — re-sign / resume: fresh part URLs plus the parts already uploaded.
+  - `POST /videos/:publicId/upload/complete` (202) — complete: verifies the parts and the assembled size, moves the row to `processing` and enqueues the job (repeating it while `processing` is idempotent).
+  - `DELETE /videos/:publicId/upload` (204) — abort: idempotent, removes the multipart upload and the source object.
+- **Lifecycle:** `draft → processing → ready | failed` (`VideoStatus` in `src/videos/entities/video.entity.ts`). A non-decodable file ends in `failed` and stays in the DB and in the storage.
+- **Queue:** BullMQ queue `video-processing`, job `process`, `jobId` = video UUID, 3 attempts with exponential backoff (`src/video-processing/video-queue.module.ts`).
+- **Worker:** separate process/container (`video-worker`, entrypoint `src/worker.ts` → `WorkerModule`, no HTTP server). It runs `ffprobe` (duration + metadata) and `ffmpeg` (thumbnail from a frame) over a presigned internal URL and stores `videos/{videoId}/thumbnail.jpg`. The API process (`AppModule`) has no consumer.
+- **Identifiers:** `public_id` (11-char URL-safe, unique) is the only external identifier; the UUID `id` is internal and names the storage keys (`videos/{videoId}/source`, `videos/{videoId}/thumbnail.jpg`).
+- **Delivery (`ready` videos only, else 409):** `GET /videos/:publicId/stream` (200) returns a presigned `GET` URL that the storage answers with `206 Partial Content` for `Range` requests; `GET /videos/:publicId/download` (200) returns a presigned URL with `Content-Disposition: attachment`.
 
 ## Docker Networking
 
