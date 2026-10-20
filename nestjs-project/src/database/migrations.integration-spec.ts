@@ -14,6 +14,8 @@ const MANAGED_TABLES = [
   'verification_tokens',
 ];
 
+const MANAGED_ENUM_TYPES = ['verification_tokens_type_enum'];
+
 describe('Database migrations (integration)', () => {
   let dataSource: DataSource;
 
@@ -31,12 +33,14 @@ describe('Database migrations (integration)', () => {
 
     await dataSource.initialize();
 
-    await Promise.all([
-      ...MANAGED_TABLES.map((table) =>
-        dataSource.query(`DROP TABLE IF EXISTS "${table}" CASCADE`),
-      ),
-      dataSource.query(`DROP TABLE IF EXISTS "migrations" CASCADE`),
-    ]);
+    // Sequential drops: concurrent DDL on FK-linked tables can deadlock.
+    for (const table of [...MANAGED_TABLES, 'migrations']) {
+      await dataSource.query(`DROP TABLE IF EXISTS "${table}" CASCADE`);
+    }
+    // Enum types survive DROP TABLE; leaving them makes re-runs fail on CREATE TYPE.
+    for (const enumType of MANAGED_ENUM_TYPES) {
+      await dataSource.query(`DROP TYPE IF EXISTS "${enumType}" CASCADE`);
+    }
   });
 
   afterAll(async () => {
@@ -44,6 +48,22 @@ describe('Database migrations (integration)', () => {
     // Re-apply so the shared DB is fully migrated when subsequent suites run.
     await dataSource.runMigrations();
     await dataSource.destroy();
+  });
+
+  it('should start from a clean schema without managed tables or enum types', async () => {
+    const tables = await dataSource.query<{ table_name: string }[]>(
+      `SELECT table_name FROM information_schema.tables
+       WHERE table_schema = 'public'
+         AND table_name = ANY($1::text[])`,
+      [[...MANAGED_TABLES, 'migrations']],
+    );
+    const enumTypes = await dataSource.query<{ typname: string }[]>(
+      `SELECT typname FROM pg_type WHERE typname = ANY($1::text[])`,
+      [MANAGED_ENUM_TYPES],
+    );
+
+    expect(tables).toHaveLength(0);
+    expect(enumTypes).toHaveLength(0);
   });
 
   it('should apply all migrations and create all four tables', async () => {
