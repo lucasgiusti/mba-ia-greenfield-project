@@ -13,6 +13,12 @@ docker compose ps   # all services must show status "running"
 Then verify each infrastructure service is actually ready to accept connections — not just running:
 
 - **PostgreSQL:** `docker compose exec db pg_isready -U streamtube` — expect `accepting connections`
+- **Redis:** `docker compose exec redis redis-cli ping` — expect `PONG`
+- **MinIO:** `curl http://localhost:9000/minio/health/live` — expect `200` (the Chainguard image has no shell, so there is no Compose healthcheck)
+- **Bucket bootstrap:** `docker compose ps -a minio-bootstrap` — expect `Exited (0)` (one-shot job; `-a` is needed because `ps` hides exited containers)
+- **Video worker:** `docker compose logs video-worker` — expect `Video worker connected to Redis, consuming queue "video-processing"`
+
+`video-worker` is the one application process that starts with `docker compose up -d`: it is a queue consumer (no HTTP port), not the API server.
 
 Only start the NestJS dev server (`npm run start:dev`) when the user **explicitly** asks to run the application — never as part of "start the environment".
 
@@ -32,8 +38,15 @@ docker compose exec nestjs-api npm run start:dev
 ```
 
 Services:
-- `nestjs-api` — NestJS API, port `3000`
+- `nestjs-api` — NestJS API, port `3000` (container idle until `npm run start:dev`)
+- `video-worker` — video processing worker (same image/bind mount as `nestjs-api`); runs `npm run start:worker:dev` on start, `restart: unless-stopped`, `init: true`; no port
 - `db` — PostgreSQL 17, port `5432`, database `streamtube`, user/password `streamtube`
+- `mailpit` — SMTP capture, ports `1025` (SMTP) and `8025` (web UI)
+- `redis` — Redis 8.2 for BullMQ, port `6379`, `--maxmemory-policy noeviction`
+- `minio` — MinIO object storage (Chainguard image `cgr.dev/chainguard/minio`, pinned by digest), ports `9000` (S3 API) and `9001` (console); root user/password = `STORAGE_ACCESS_KEY` / `STORAGE_SECRET_KEY`; data in the `minio-data` volume
+- `minio-bootstrap` — one-shot `mc` job that waits for MinIO and creates the `STORAGE_BUCKET` bucket (`--ignore-existing`); `nestjs-api` and `video-worker` start only after it exits 0
+
+The image (`Dockerfile.dev`) ships `ffmpeg`/`ffprobe`, used by the worker and by the tests.
 
 All verification and teardown commands run on the **host machine**:
 
@@ -44,8 +57,14 @@ curl http://localhost:3000
 # Verify PostgreSQL is ready (runs inside the db container)
 docker compose exec db pg_isready -U streamtube
 
+# Verify Redis / MinIO / bucket bootstrap
+docker compose exec redis redis-cli ping
+curl http://localhost:9000/minio/health/live
+docker compose ps -a minio-bootstrap
+
 # Check container logs
 docker compose logs nestjs-api
+docker compose logs video-worker
 docker compose logs db
 
 # Tear down the entire environment
@@ -62,6 +81,7 @@ docker compose down
 npm run start:dev                        # Dev server with hot-reload
 npm run build                            # Compile to dist/
 npm run start:prod                       # Run compiled build
+npm run migration:run                    # Apply pending TypeORM migrations
 
 npm test                                 # Unit tests
 npm run test:watch                       # Unit tests in watch mode
@@ -72,6 +92,15 @@ npx tsc --noEmit                         # Type-check (required before declaring
 npm run lint                             # ESLint with auto-fix
 npm run format                           # Prettier formatting
 ```
+
+### Video worker (runs in the `video-worker` container)
+
+```bash
+npm run start:worker:dev                 # Worker in watch mode (default command of video-worker)
+npm run start:worker:prod                # Compiled worker: node dist/worker
+```
+
+The worker entrypoint is `src/worker.ts` (`NestFactory.createApplicationContext(WorkerModule)`, no HTTP server). `nestjs-api` and `video-worker` share `dist/` through the bind mount and `nest-cli.json` has `deleteOutDir: true`: a `build`/`start:dev` in `nestjs-api` briefly deletes and re-emits the `dist/` the watching worker uses (the worker's watch then rebuilds too).
 
 ### Host-only commands (Docker / connectivity probes)
 
@@ -84,6 +113,8 @@ curl http://localhost:3000
 
 ### Test execution
 
+Tests use the real Compose infrastructure (`db`, `redis`, `minio`, `mailpit`) and FFmpeg from the image — keep those services up.
+
 Integration and e2e suites share a single test database. They **must** be run with `--runInBand`:
 
 ```bash
@@ -92,6 +123,8 @@ docker compose exec nestjs-api npm run test:e2e   # already configured
 ```
 
 Parallel execution causes FK violations, deadlocks, and cross-suite contamination because suites truncate or seed shared tables concurrently.
+
+The `video-worker` container may stay up while tests run: tests that touch the queue switch BullMQ to the `bull-test` key prefix with `useTestQueuePrefix()` (`src/test/test-queue-prefix.ts`), and the container only consumes the default `bull` prefix. A test that needs a consumer starts its own in-process `WorkerModule` with that helper (see `test/video-lifecycle.e2e-spec.ts`).
 
 During active development, run only the tests related to the file being changed (`npm test -- path/to/file.spec.ts`). Before declaring a task done, run the full suite — see the global `CLAUDE.md` → "Definition of Done (Technical)".
 
@@ -138,6 +171,8 @@ MAIL_FROM="StreamTube <noreply@streamtube.local>"
 
 Whenever possible, prefer storing only the bare address in `.env` and composing display names in code (e.g., in `mail.config.ts`) so the file stays shell-safe.
 
+Object storage has two endpoints: `STORAGE_ENDPOINT` (`http://minio:9000`) is used server-side by the API and the worker; `STORAGE_PUBLIC_ENDPOINT` (`http://localhost:9000`) is the host signed into the presigned URLs handed to clients (the browser on the host machine). Inside a container `localhost:9000` is unreachable, so tests that `fetch` presigned URLs override `STORAGE_PUBLIC_ENDPOINT=http://minio:9000` before compiling the module. Other keys added for videos: `STORAGE_REGION`, `STORAGE_ACCESS_KEY`, `STORAGE_SECRET_KEY`, `STORAGE_BUCKET`, `REDIS_HOST`, `REDIS_PORT`, `UPLOAD_MAX_SIZE_BYTES`, `UPLOAD_PART_SIZE_BYTES`, `UPLOAD_PART_URL_TTL_SECONDS` (see `.env.example`, validated in `src/config/env.validation.ts`).
+
 ## Build Assets
 
 `tsc` (and therefore `nest build`) only emits compiled `.ts` files to `dist/`. Any non-TypeScript runtime asset — Handlebars templates (`.hbs`), JSON fixtures, static config files, etc. — must be declared in `nest-cli.json` under `compilerOptions.assets` (with `watchAssets: true` for dev). Without that, the file exists in `src/` but is missing in `dist/` and runtime fails only after build.
@@ -147,6 +182,8 @@ Whenever possible, prefer storing only the bare address in `.env` and composing 
 NestJS with standard module structure. Source lives in `src/`, compiled output in `dist/`.
 
 - Each domain feature gets its own module (e.g., `UsersModule`, `VideosModule`) registered in `AppModule`
+- `CoreModule` (`src/core/`) holds the shared infrastructure (Config, TypeORM, BullMQ connection) and is imported by both roots: `AppModule` (HTTP API, `src/main.ts`) and `WorkerModule` (video worker, `src/worker.ts`)
+- The queue consumer (`VideoProcessingModule`) is imported only by `WorkerModule`; the API only enqueues through `VideoQueueModule`
 - Controllers handle HTTP routing; Services hold business logic; both are scoped to their module
 
 ## Code Conventions

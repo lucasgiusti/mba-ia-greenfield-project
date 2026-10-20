@@ -1,7 +1,7 @@
 # phase-03-videos — Progress
 
-**Status:** in_progress
-**SIs:** 17/20 completed
+**Status:** completed
+**SIs:** 20/20 completed
 
 ### SI-03.1 — Tornar o harness de migrations re-executável
 - **Status:** completed
@@ -159,16 +159,28 @@
   - **Session check after SI-03.17 (video-worker container running and consuming):** `npm test -- --runInBand` 40 suites / 297 tests green; `npm run test:e2e` 9 suites / 78 tests green; `tsc --noEmit` exit 0; `npm run lint` 0 errors (1 pre-existing warning in auth.service.integration-spec.ts). The container worker logged no processing of test jobs.
 
 ### SI-03.18 — Verificação ponta a ponta do ciclo upload → processamento → streaming/download
-- **Status:** pending
-- **Tests:** —
-- **Observations:** none
+- **Status:** completed
+- **Tests:** 4 passing (test/video-lifecycle.e2e-spec.ts), with the `video-worker` container running and consuming (its log shows no processing of test jobs)
+- **Observations:**
+  - The in-process worker is built with `useTestQueuePrefix(Test.createTestingModule({ imports: [WorkerModule] })).compile()` + `init()` instead of `NestFactory.createApplicationContext(WorkerModule)` (action 1): the test prefix override needs the testing builder (same reasoning as SI-03.15). Lifecycle is the same `NestApplicationContext`; API (`createVideosE2eApp`) and worker run in the same Jest process.
+  - To observe `processing` in the DB deterministically (otherwise the worker can flip the row to `ready` before the read), the main scenario pauses the in-process BullMQ worker (`consumer.worker.pause()`) around `complete`, asserts `processing`, then resumes; no other client call happens after `complete`. `draft` is asserted on the row right after `POST /videos`.
+  - Polling is bounded (30 s, 200 ms interval, explicit error message with the last status). In practice each video reaches its terminal state in < 1 s.
+  - `thumbnail_key` is not a column (the key is derived, `videoThumbnailKey(id)` per the Data Model); the AC is verified with `HeadObject` on `videos/{videoId}/thumbnail.jpg` (`image/jpeg`, size > 0). The failed path also asserts `duration_seconds`/`metadata` stay null and the source object remains with the declared size.
+  - Extra assertions beyond the plan: `Content-Range: bytes 0-1023/<size>` and 1024-byte body on the stream fetch; full body length on the download fetch; distinct UUID `id` for the two videos.
 
 ### SI-03.19 — OpenAPI: atualizar `openapi.json` exportado com os endpoints de vídeo
-- **Status:** pending
-- **Tests:** —
-- **Observations:** none
+- **Status:** completed
+- **Tests:** 28 passing (openapi-export.integration-spec.ts: 9 existing + 19 new); test/swagger.e2e-spec.ts 6 passing
+- **Observations:**
+  - `openapi.json` regenerated with `npm run openapi:export`: 5 video paths / 6 operations added (`POST /videos`, `GET`/`DELETE /videos/{publicId}/upload`, `POST /videos/{publicId}/upload/complete`, `GET /videos/{publicId}/stream`, `GET /videos/{publicId}/download`), each with tag `videos`, `security: [{ access-token: [] }]`, exactly the API Contracts statuses, and every error response `$ref` `ApiErrorEnvelope`. The new tests assert the exact path set, the exact method set per path, the exact status set per operation, tag/security and the error `$ref`s.
+  - AC "docs-json lists the same routes": verified manually by running `node dist/main` with `SWAGGER_ENABLED=true PORT=3999` inside `nestjs-api` and comparing `GET /api/docs-json` with the exported file: the 16 operations match in path, method, status set, security and tags.
+  - **Pre-existing export gap (out of scope, follow-up):** `src/openapi-export.ts` does not call `SwaggerModule.loadPluginMetadata(metadata)` as `main.ts` does, so DTOs that rely only on the Swagger CLI plugin are exported with empty `properties` — already the case for every auth request DTO in the committed file, and now also `CreateVideoUploadDto` and `CompleteVideoUploadDto` (its `CompletedPartDto` item schema is missing). The live `/api/docs-json` has them. Response DTOs with explicit `@ApiProperty` are complete. Also from the plugin: `GET /` 200 schema and the `token` query param of `/auth/confirm-email` are missing from the export. The fix (load plugin metadata in `exportSpec`) is a separate task; the frontend contract file is incomplete for request bodies until then.
 
 ### SI-03.20 — Documentação: seção de vídeos nos CLAUDE.md coerente com o código
-- **Status:** pending
-- **Tests:** —
-- **Observations:** none
+- **Status:** completed
+- **Tests:** no tests (documentation only) — ACs verified against the code and the Docker environment
+- **Observations:**
+  - Root `CLAUDE.md`: `Message Queue** (BullMQ on Redis)` and a new "Videos" section (init / re-sign / complete / abort with method, path and status; `draft → processing → ready | failed`; queue `video-processing`, job `process`, `jobId` = UUID, 3 attempts + exponential backoff; worker entrypoint `src/worker.ts`; `public_id`; stream `206` / download `attachment`). The stale "`next-frontend/` — not yet initialized" line was left untouched (SI-03.20 does not ask for it).
+  - `nestjs-project/CLAUDE.md`: services (`video-worker`, `mailpit`, `redis`, `minio` 9000/9001 Chainguard, `minio-bootstrap`), readiness checks, `npm run migration:run`, a "Video worker" commands block (`start:worker:dev` / `start:worker:prod`), FFmpeg in `Dockerfile.dev`, `STORAGE_ENDPOINT` vs `STORAGE_PUBLIC_ENDPOINT` + the new env keys, the `bull-test` test prefix note, `CoreModule`/`WorkerModule` architecture lines.
+  - **Plan vs reality:** the plan's readiness check `docker compose ps minio-bootstrap` prints an empty table once the one-shot job exited (`ps` hides exited containers); documented `docker compose ps -a minio-bootstrap` (shows `Exited (0)`).
+  - Verification: every path, script, env key (present in both `.env.example` and `src/config/env.validation.ts`), port and log line was grepped against the code/compose; `redis-cli ping` → PONG, MinIO health → 200, `ps -a minio-bootstrap` → Exited (0), `docker compose logs video-worker` shows the consuming line, `npm run start:worker:prod` in `video-worker` logged the same line (stopped with `timeout`), `start:worker:dev` is the container's running command.

@@ -438,6 +438,430 @@
           "auth"
         ]
       }
+    },
+    "/videos": {
+      "post": {
+        "description": "Pre-registers the video as a draft in the authenticated user's channel, opens the multipart upload in storage and returns one presigned UploadPart URL per part, so the file goes straight from the client to storage.",
+        "operationId": "VideosController_create",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateVideoUploadDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Draft created and multipart upload started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateVideoUploadResponseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (invalid body or size above the configured maximum)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid access token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "access-token": []
+          }
+        ],
+        "summary": "Start a video upload",
+        "tags": [
+          "videos"
+        ]
+      }
+    },
+    "/videos/{publicId}/upload": {
+      "get": {
+        "description": "Returns the parts already uploaded (with their ETags) and fresh presigned UploadPart URLs only for the missing parts of a draft owned by the caller. Changes neither the video nor the processing queue.",
+        "operationId": "VideosController_resignUpload",
+        "parameters": [
+          {
+            "name": "publicId",
+            "required": true,
+            "in": "path",
+            "description": "Public video id (11 characters)",
+            "schema": {
+              "example": "Xb3k_9QmZ1a",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Uploaded parts and URLs for the missing parts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResignVideoUploadResponseDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid access token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Video not found or owned by another channel",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Video is not a draft or the multipart upload no longer exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "access-token": []
+          }
+        ],
+        "summary": "Resume a video upload",
+        "tags": [
+          "videos"
+        ]
+      },
+      "delete": {
+        "description": "Abandons the upload of a draft owned by the caller: aborts the multipart upload and discards any assembled source object. The video stays a draft; repeating the call returns the same response.",
+        "operationId": "VideosController_abortUpload",
+        "parameters": [
+          {
+            "name": "publicId",
+            "required": true,
+            "in": "path",
+            "description": "Public video id (11 characters)",
+            "schema": {
+              "example": "Xb3k_9QmZ1a",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Upload aborted"
+          },
+          "401": {
+            "description": "Missing or invalid access token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Video not found or owned by another channel",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Video is not a draft",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "access-token": []
+          }
+        ],
+        "summary": "Abort a video upload",
+        "tags": [
+          "videos"
+        ]
+      }
+    },
+    "/videos/{publicId}/upload/complete": {
+      "post": {
+        "description": "Completes the multipart upload with the uploaded parts and their ETags, verifies the assembled object against the declared size and starts background processing. Repeating it on a processing video is idempotent (same job).",
+        "operationId": "VideosController_completeUpload",
+        "parameters": [
+          {
+            "name": "publicId",
+            "required": true,
+            "in": "path",
+            "description": "Public video id (11 characters)",
+            "schema": {
+              "example": "Xb3k_9QmZ1a",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompleteVideoUploadDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Upload verified; processing started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompleteVideoUploadResponseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid access token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Video not found or owned by another channel",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Video is ready/failed, or the multipart upload no longer exists and no object was assembled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "INVALID_UPLOAD_PARTS (parts list rejected, upload stays open) or UPLOAD_VERIFICATION_FAILED (assembled size differs from the declared size; object discarded)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "access-token": []
+          }
+        ],
+        "summary": "Complete a video upload",
+        "tags": [
+          "videos"
+        ]
+      }
+    },
+    "/videos/{publicId}/stream": {
+      "get": {
+        "description": "Returns a short-lived presigned URL of the ready video owned by the caller, served directly by the storage with Range / 206 Partial Content support (no redirect; bytes never pass through the API).",
+        "operationId": "VideosController_getStreamUrl",
+        "parameters": [
+          {
+            "name": "publicId",
+            "required": true,
+            "in": "path",
+            "description": "Public video id (11 characters)",
+            "schema": {
+              "example": "Xb3k_9QmZ1a",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Presigned streaming URL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoDeliveryUrlResponseDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid access token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Video not found or owned by another channel",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Video is not ready",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "access-token": []
+          }
+        ],
+        "summary": "Get a streaming URL for a video",
+        "tags": [
+          "videos"
+        ]
+      }
+    },
+    "/videos/{publicId}/download": {
+      "get": {
+        "description": "Returns a short-lived presigned URL of the ready video owned by the caller; the storage serves the whole file with `Content-Disposition: attachment` and the original file name.",
+        "operationId": "VideosController_getDownloadUrl",
+        "parameters": [
+          {
+            "name": "publicId",
+            "required": true,
+            "in": "path",
+            "description": "Public video id (11 characters)",
+            "schema": {
+              "example": "Xb3k_9QmZ1a",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Presigned download URL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoDeliveryUrlResponseDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid access token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Video not found or owned by another channel",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Video is not ready",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "access-token": []
+          }
+        ],
+        "summary": "Get a download URL for a video",
+        "tags": [
+          "videos"
+        ]
+      }
     }
   },
   "info": {
@@ -480,6 +904,184 @@
       "ResetPasswordDto": {
         "type": "object",
         "properties": {}
+      },
+      "CreateVideoUploadDto": {
+        "type": "object",
+        "properties": {}
+      },
+      "VideoUploadPartUrlDto": {
+        "type": "object",
+        "properties": {
+          "part_number": {
+            "type": "number",
+            "example": 1,
+            "description": "Multipart part number (1-based)"
+          },
+          "url": {
+            "type": "string",
+            "description": "Presigned UploadPart URL (PUT the part bytes to it)",
+            "example": "http://localhost:9000/streamtube/videos/.../source?partNumber=1&uploadId=..."
+          }
+        },
+        "required": [
+          "part_number",
+          "url"
+        ]
+      },
+      "CreateVideoUploadResponseDto": {
+        "type": "object",
+        "properties": {
+          "public_id": {
+            "type": "string",
+            "example": "Xb3k_9QmZ1a",
+            "description": "Public video id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft"
+            ],
+            "example": "draft"
+          },
+          "part_size": {
+            "type": "number",
+            "example": 104857600,
+            "description": "Part size in bytes"
+          },
+          "part_count": {
+            "type": "number",
+            "example": 103,
+            "description": "ceil(size / part_size)"
+          },
+          "parts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VideoUploadPartUrlDto"
+            }
+          },
+          "expires_in": {
+            "type": "number",
+            "example": 3600,
+            "description": "URL validity in seconds"
+          }
+        },
+        "required": [
+          "public_id",
+          "status",
+          "part_size",
+          "part_count",
+          "parts",
+          "expires_in"
+        ]
+      },
+      "UploadedPartDto": {
+        "type": "object",
+        "properties": {
+          "part_number": {
+            "type": "number",
+            "example": 1
+          },
+          "etag": {
+            "type": "string",
+            "example": "\"5d41402abc4b2a76b9719d911017c592\"",
+            "description": "ETag returned by the part upload (quotes included)"
+          }
+        },
+        "required": [
+          "part_number",
+          "etag"
+        ]
+      },
+      "ResignVideoUploadResponseDto": {
+        "type": "object",
+        "properties": {
+          "public_id": {
+            "type": "string",
+            "example": "Xb3k_9QmZ1a",
+            "description": "Public video id"
+          },
+          "part_size": {
+            "type": "number",
+            "example": 104857600,
+            "description": "Part size persisted at init"
+          },
+          "part_count": {
+            "type": "number",
+            "example": 103,
+            "description": "ceil(declared size / part size)"
+          },
+          "uploaded_parts": {
+            "description": "Parts already uploaded",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UploadedPartDto"
+            }
+          },
+          "parts": {
+            "description": "Fresh presigned URLs for the missing parts only",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VideoUploadPartUrlDto"
+            }
+          },
+          "expires_in": {
+            "type": "number",
+            "example": 3600,
+            "description": "URL validity in seconds"
+          }
+        },
+        "required": [
+          "public_id",
+          "part_size",
+          "part_count",
+          "uploaded_parts",
+          "parts",
+          "expires_in"
+        ]
+      },
+      "CompleteVideoUploadDto": {
+        "type": "object",
+        "properties": {}
+      },
+      "CompleteVideoUploadResponseDto": {
+        "type": "object",
+        "properties": {
+          "public_id": {
+            "type": "string",
+            "example": "Xb3k_9QmZ1a",
+            "description": "Public video id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "processing"
+            ],
+            "example": "processing"
+          }
+        },
+        "required": [
+          "public_id",
+          "status"
+        ]
+      },
+      "VideoDeliveryUrlResponseDto": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "Presigned GetObject URL of the video source, served by the storage itself (supports Range / 206 Partial Content)",
+            "example": "http://localhost:9000/streamtube/videos/.../source?X-Amz-..."
+          },
+          "expires_in": {
+            "type": "number",
+            "example": 3600,
+            "description": "URL validity in seconds"
+          }
+        },
+        "required": [
+          "url",
+          "expires_in"
+        ]
       },
       "ApiErrorEnvelope": {
         "type": "object",
