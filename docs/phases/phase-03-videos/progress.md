@@ -1,7 +1,7 @@
 # phase-03-videos — Progress
 
 **Status:** in_progress
-**SIs:** 5/20 completed
+**SIs:** 12/20 completed
 
 ### SI-03.1 — Tornar o harness de migrations re-executável
 - **Status:** completed
@@ -49,39 +49,67 @@
   - **Lint (pre-existing, out of scope):** `npm run lint` exits 1 with 150 errors / 40 warnings, all in files this session did not create (auth.service*.spec, channels.service*, filters specs, mail.service.integration-spec, create-test-data-source, users.service.integration-spec, test/auth.e2e-spec, plus 2 lines in the pre-existing SWAGGER_ENABLED test of env.validation.integration-spec.ts). Files created/changed in SI-03.1–03.5 lint clean. Needs a separate cleanup task.
 
 ### SI-03.6 — Entidade Video, migration CreateVideos e extensão do harness de testes
-- **Status:** pending
-- **Tests:** —
-- **Observations:** none
+- **Status:** completed
+- **Tests:** 14 passing (video.entity.integration-spec 9, migrations.integration-spec 4, videos.module.spec 1); migrations spec run twice consecutively green; regression channels/users/auth 115 passing
+- **Observations:**
+  - Migration generated via `npm run migration:generate` in the container: `src/database/migrations/1792498981670-CreateVideos.ts` (class `CreateVideos1792498981670`). The CLI does not create an index for a FK column on Postgres, so `@Index()` was added on `Video.channel_id` to get the `(channel_id)` index the Data Model / action 2 require; the migration was then regenerated (first generation discarded unexecuted).
+  - Adding `Channel.videos` (`@OneToMany`) makes TypeORM require `Video` in every DataSource that loads `Channel`; the explicit `ALL_ENTITIES` arrays of the 10 existing auth/users/channels specs gained `Video` (otherwise metadata building fails with "Entity metadata for Channel#videos was not found"). No behavior change in those specs.
+  - `metadata` is typed as `VideoMetadata { width, height, video_codec, container_format, bitrate, size }` (nullable members); SI-03.14 fills it.
+  - Migrations spec gained an explicit assertion test for `videos_status_enum`, the unique `public_id` index, the `channel_id` index and the FK to `channels` (AC of `migration:run`); the revert test now asserts `videos` + `videos_status_enum` are gone while the token tables remain.
+  - `npm run migration:run` applied CreateVideos to the dev DB (verified with `\d videos`).
 
 ### SI-03.7 — Exceções de domínio de vídeo e gerador de public_id
-- **Status:** pending
-- **Tests:** —
-- **Observations:** none
+- **Status:** completed
+- **Tests:** 14 passing (public-id.util.spec 3, domain-exception.filter.spec 11 — 5 new)
+- **Observations:**
+  - `videos.constants.ts` also exports the derived type `AcceptedVideoMimeType` (union of `ACCEPTED_VIDEO_MIME_TYPES`) for the DTO field type.
 
 ### SI-03.8 — VideoQueueModule e producer do job de processamento
-- **Status:** pending
-- **Tests:** —
-- **Observations:** none
+- **Status:** completed
+- **Tests:** 4 passing (producer integration 3, module unit 1)
+- **Observations:**
+  - "No consumer in the API process" AC is asserted via `DiscoveryService` (no provider is a `WorkerHost`) instead of `queue.getWorkersCount()`, because the worker count is global per Redis queue and becomes 1 once the `video-worker` container runs the consumer (SI-03.15).
+  - The module unit spec uses `lazyConnect: true` in the test `BullModule.forRoot` connection so compilation does not require Redis I/O.
+  - The integration spec uses the real `CoreModule` (root BullMQ connection to the Compose `redis` host) + `VideoQueueModule`, obliterating the queue before each test and in `afterAll`.
 
 ### SI-03.9 — Endpoint POST /videos (pré-cadastro do rascunho + início do multipart)
-- **Status:** pending
-- **Tests:** —
-- **Observations:** none
+- **Status:** completed
+- **Tests:** 19 passing — videos.service.spec 6 (initUpload), videos.service.integration-spec 2, channels.service.integration-spec 2 new (5 total), videos.module.spec 1, test/videos-create.e2e-spec.ts 5 (spec-derived)
+- **Observations:**
+  - **Plan vs reality:** AC #2 / spec 1.1 "o UUID `id` não aparece em nenhum ponto do corpo da resposta" is impossible as written: each presigned part URL path carries the storage key `videos/{uuid}/source`, which TD-03 fixes on the UUID. Smallest fix: the e2e asserts no `id` field and that the UUID appears nowhere in the body outside `parts[].url` (the API never exposes it as an identifier, per TD-10 AMB-12). Worth a TD-03/TD-10 note if the URL path exposure matters.
+  - Test modules that import `VideosModule` must also import `UsersModule`: with `autoLoadEntities`, `ChannelsModule` registers only `Channel`, and its `Channel#user` relation needs `User` (in the app it comes from `AuthModule → UsersModule`). `VideosModule` keeps exactly the imports the plan lists. The worker module (SI-03.15) will need the same `User` registration.
+  - `initUpload` throws a plain `Error` if the authenticated user has no channel (every registered user gets one; no catalog code exists for this invariant violation → 500).
+  - `findByUserId` uses `dataSource.getRepository(Channel)` to keep `ChannelsService`'s existing `DataSource`-only constructor.
+  - `VideosService` already injects `VideoProcessingProducer` (used from SI-03.11) and `@Inject(uploadConfig.KEY)`.
+  - New test helpers: `test/support/videos-e2e.ts` (AppModule boot with main.ts globals, per-test reset of storage/DB/throttler/queue, `registerConfirmAndLogin` with the auth e2e spy pattern) shared by the video e2e files, and `src/test/presigned-put.ts` (PUT to a URL signed for `STORAGE_PUBLIC_ENDPOINT` by connecting to `STORAGE_ENDPOINT` while keeping the signed Host header) for integration specs that must keep the real public endpoint.
+  - `@ApiResponse` 201 uses `type: CreateVideoUploadResponseDto` (response DTO with explicit `@ApiProperty`).
 
 ### SI-03.10 — Endpoint GET /videos/:publicId/upload (re-sign / retomada)
-- **Status:** pending
-- **Tests:** —
-- **Observations:** none
+- **Status:** completed
+- **Tests:** 17 passing — videos.service.spec 8 new (findOwnedByPublicId 2, resignUpload 6), videos.service.integration-spec 2 new, test/videos-upload-resign.e2e-spec.ts 5 (spec-derived); SI-03.9 tests of the same files still green
+- **Observations:**
+  - `findOwnedByPublicId` resolves the row by `public_id`, then compares `channel_id` with `ChannelsService.findByUserId(userId)`; unknown and non-owned both raise `VideoNotFoundException` before any state check.
+  - `resignUpload` also treats a `draft` row without `upload_id` (init failed between the row insert and `CreateMultipartUpload`) as `InvalidVideoStateException` — there is no upload to resume.
+  - The integration spec PUTs part 1 through the real public-endpoint URL using `src/test/presigned-put.ts`; the e2e follows its spec (`STORAGE_PUBLIC_ENDPOINT=http://minio:9000` + `UPLOAD_PART_SIZE_BYTES=5242880` set before compiling, restored in `afterAll`) and uses `fetch` PUT. The config-change scenario boots a second AppModule instance with `UPLOAD_PART_SIZE_BYTES=10485760` (factories read `process.env` at compile) and closes it in `finally`.
+  - Controller shares `PUBLIC_ID_PARAM` (`@ApiParam`) and `ERROR_ENVELOPE` (`getSchemaPath(ApiErrorEnvelope)`) constants across handlers.
 
 ### SI-03.11 — Endpoint POST /videos/:publicId/upload/complete (verificação + disparo do processamento)
-- **Status:** pending
-- **Tests:** —
-- **Observations:** none
+- **Status:** completed
+- **Tests:** 28 passing — videos.service.spec 12 new (completeUpload), videos.service.integration-spec 5 new, test/videos-upload-complete.e2e-spec.ts 6/6 (spec-derived; scenario 1.5 green only once SI-03.12 landed, see below)
+- **Observations:**
+  - **Cross-SI dependency in the spec:** scenario 1.5 (`ready-failed-ou-apos-abort-retorna-409`) calls `DELETE /videos/:publicId/upload`, which is SI-03.12. At SI-03.11 time the run was 5/6 with 1.5 failing only on that DELETE (404 route not found); the e2e was left as authored and went 6/6 after SI-03.12 (re-run recorded there). The integration spec covers "complete após abort → 409" with a direct `StorageService.abortMultipartUpload`.
+  - Parts-list check is a pure set comparison against 1..ceil(declared_size / part_size) from the persisted row (duplicates, gaps and out-of-range numbers all → `InvalidUploadPartsException` before any S3 call).
+  - A `draft` row without `upload_id` is treated as `InvalidVideoStateException` (same rule as re-sign).
+  - The e2e tampered-ETag case gets `InvalidPart` from MinIO → `StorageInvalidPartsError` → 422, and the following re-sign still lists both parts (multipart left open).
 
 ### SI-03.12 — Endpoint DELETE /videos/:publicId/upload (abort idempotente)
-- **Status:** pending
-- **Tests:** —
-- **Observations:** none
+- **Status:** completed
+- **Tests:** 15 passing — videos.service.spec 7 new (abortUpload), videos.service.integration-spec 3 new, test/videos-upload-abort.e2e-spec.ts 5 (spec-derived); re-run of test/videos-upload-complete.e2e-spec.ts now 6/6 (scenario 1.5 uses this DELETE)
+- **Observations:**
+  - Per SI-03.5: this MinIO build answers 204 to a repeated/unknown-id `AbortMultipartUpload` instead of `NoSuchUpload`, so on Compose the "ignore `StorageUploadNotFoundError`" branch is exercised only by the unit spec (AWS S3 behavior); the integration/e2e repeated-abort cases pass through the plain 204 path. Either way the subsequent `DeleteObject` always runs and the response is the same 204.
+  - `abortUpload` skips the abort call for a `draft` row without `upload_id` (nothing to abort) but still deletes the source key.
+  - "Multipart already completed with row `draft`" is reproduced by calling `StorageService.completeMultipartUpload` directly; after the abort `HeadObject` is NotFound and a later `complete` is 409 `INVALID_VIDEO_STATE` (integration + e2e).
+  - **Session check after SI-03.12 (out of scope, follow-up):** `npm run test:e2e` as defined in package.json (`jest --config ./test/jest-e2e.json`) does NOT run in band, contrary to nestjs-project/CLAUDE.md ("already configured"). With 7 e2e suites sharing one DB it fails (25 failed / 48 passed: FK violations in `cleanAllTables`, cross-suite contamination). `npm run test:e2e -- --runInBand` → 7 suites / 73 tests green. Fixed in this phase: `--runInBand` added to the `test:e2e` script (the new Phase 03 e2e suites are what made the parallel run break; aligns the script with nestjs-project/CLAUDE.md) → `npm run test:e2e` 7 suites / 73 tests green. Same session: `npm test -- --runInBand` 34 suites / 247 tests green; `tsc --noEmit` clean; `npm run lint` 0 errors (1 pre-existing warning in auth.service.integration-spec.ts).
 
 ### SI-03.13 — FfmpegService (wrapper tipado de ffprobe/ffmpeg via spawn) e gerador de vídeo de teste
 - **Status:** pending
