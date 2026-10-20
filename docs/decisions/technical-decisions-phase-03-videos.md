@@ -1,7 +1,7 @@
 ---
 scope_type: phase
 related_phases: [3]
-status: pending
+status: decided
 date: 2026-10-19
 scope_description: "Backend foundation for video upload and processing: queue technology, 10GB direct-to-storage upload protocol, object-storage layout, draft pre-registration and completion trigger, status lifecycle and failure policy, worker topology, FFmpeg/ffprobe integration, unique video URL identifier, and streaming/download delivery."
 ---
@@ -55,7 +55,13 @@ _Inherited constraints (not reopened):_
 
 **Recommendation:** **Option A (BullMQ on Redis)** — it is the documented NestJS approach and covers retries, backoff, stalled detection and non-retryable errors with no custom code, which matters for 10GB jobs that can crash a worker mid-way. The one Redis container is a small cost. **Option B (pg-boss)** is a close second if avoiding new infrastructure matters more than framework integration: its transactional enqueue is a real advantage. Option D is not recommended yet because it is too new and has no Nest wiring.
 
-**Decision:** _[pending]_
+**Decision:** A (BullMQ on Redis — `@nestjs/bullmq` + `bullmq`)
+**Libraries:** @nestjs/bullmq@^11.0.5, bullmq@^6, ioredis@>=5
+
+**Revisions:**
+- 2026-10-19 — Library pin fixed: `@nestjs/bullmq@^11.0.5` + `bullmq@^6`, plus `ioredis` installed explicitly. Rationale: only `@nestjs/bullmq@11.0.5` declares `bullmq ^6.0.0` in its peerDependencies (11.0.0–11.0.4 stop at `^5.0.0`) and `@nestjs/bullmq@12.x` is ESM-only (`"type": "module"`), incompatible with the CommonJS project; bullmq 6 made `ioredis` an optional peer dependency (`>=5.0.0`) that Redis users must install themselves (OQ-1).
+- 2026-10-19 — The queue `jobId` and the job payload's video reference are the video's UUID primary key, not `public_id` (TD-10). Rationale: AMB-3 — internal identifiers for storage keys and job IDs, `public_id` only in the URL.
+- 2026-10-19 — `complete` idempotency / lost-enqueue recovery: when the video is already `processing`, a repeated `complete` re-enqueues with the same `jobId`; BullMQ ignores an add whose `jobId` already exists, so a live job is not duplicated and a lost enqueue (DB committed, Redis call failed) is recovered. When the video is `ready` or `failed`, `complete` is a no-op/conflict per the error catalog (`phase-02-auth/TD-07`). Rationale: AMB-6.
 
 ---
 
@@ -86,7 +92,15 @@ _Inherited constraints (not reopened):_
 
 **Recommendation:** **Option A (presigned multipart, direct to storage)** — it is the only option that keeps 10GB of traffic off both the NestJS API and the Next.js BFF while still being resumable. It also matches what `next-frontend-config-base/TD-03` already anticipated (video bytes use storage URLs, not the backend URL). The cost is a few small orchestration endpoints and a bucket CORS rule.
 
-**Decision:** _[pending]_
+**Decision:** A (S3 multipart upload with presigned part URLs, direct to storage)
+**Libraries:** @aws-sdk/client-s3@^3.1153.0, @aws-sdk/s3-request-presigner@^3.1153.0
+
+**Revisions:**
+- 2026-10-19 — Two S3 endpoints with an explicit env-key pair: the internal endpoint (`STORAGE_ENDPOINT`, e.g. `http://minio:9000`, the Compose service name) is used for every API server-side S3 call and by the worker, including the presigned GET handed to FFmpeg (signed with the internal host, TD-09); the public endpoint (`STORAGE_PUBLIC_ENDPOINT`, browser-reachable, e.g. `http://localhost:9000`) is used only to sign URLs returned to clients (upload part URLs here, playback/download URLs in TD-11). SigV4 covers the host, so each URL is signed by the client bound to the host that will fetch it. Rationale: IC-1 — a URL signed for the public host cannot be fetched from inside a container and vice versa.
+- 2026-10-19 — Upload validation contract fixed: accepted MIME types `video/mp4`, `video/webm`, `video/quicktime`, `video/x-matroska`; maximum size 10 GiB (10737418240 bytes); part size 100 MiB (104857600 bytes, so at most 103 parts, well under the S3 limit of 10,000); presigned URL TTL 1h. Size limit, part size and TTL are configurable via env keys (Joi-validated in `env.validation.ts`) with these values as defaults. Rationale: AMB-1.
+- 2026-10-19 — Endpoint surface: `init` (creates the draft row + the S3 multipart upload and returns the presigned part URLs), `complete` (receives the parts with their ETags, completes the multipart upload and starts processing) and `abort` (aborts the multipart upload). The multipart `upload_id` is persisted on the video row. No resume / `ListParts` / re-sign endpoint — not a phase capability. Rationale: AMB-2.
+- 2026-10-19 — Resume endpoint added, replacing the "No resume / `ListParts` / re-sign endpoint" clause of the AMB-2 revision above. A re-sign endpoint accepts an existing `upload_id` of a `draft` video owned by the caller. It calls S3 `ListParts` (internal endpoint, paginated) and returns the parts already uploaded (part number + `ETag`) plus fresh presigned `UploadPart` URLs for the missing part numbers (1..ceil(declared size / part size), from the size declared at `init`). The URLs are signed for the public endpoint (`STORAGE_PUBLIC_ENDPOINT`) with the configured part-URL TTL (default 1h, env-configurable). A 10 GiB upload can therefore continue after a connection failure, a page reload or expired URLs without a new `init`. This meets `docs/project-plan.md` Pontos de Atenção ("permita retomar em caso de falha de conexão") and keeps the "while still being resumable" premise of the Recommendation. Out-of-state calls follow the TD-04 AMB-7 revision. Rationale: IC-3.
+- 2026-10-19 — The re-sign part numbering (1..ceil(declared size / part size)) uses the declared size and the part size persisted on the `videos` row at `init` (TD-04 AMB-8 revision), not the current part-size env value, so a configuration change cannot renumber the parts of an open upload. Rationale: AMB-8.
 
 ---
 
@@ -117,7 +131,12 @@ _Inherited constraints (not reopened):_
 
 **Recommendation:** **Option A (single private bucket, per-video prefix)** — the smallest setup that works across dev and prod. It keeps everything private by default, which leaves room for Phase 04 visibility rules (draft/unlisted). It lets the API and worker derive keys from the video ID. Splitting buckets can be added later without changing the video ID contract.
 
-**Decision:** _[pending]_
+**Decision:** A (Single private bucket, per-video prefix)
+**Libraries:** —
+
+**Revisions:**
+- 2026-10-19 — `{videoId}` in the object keys (`videos/{videoId}/source`, `videos/{videoId}/thumbnail.jpg`) is the video's UUID primary key; `public_id` (TD-10) is never part of a storage key. Rationale: AMB-3.
+- 2026-10-19 — Bucket lifecycle: the Phase 03 bootstrap creates the bucket only. On MinIO the server's default stale-upload expiry (24h) removes abandoned multipart uploads. The S3 `AbortIncompleteMultipartUpload` lifecycle rule for production is a production-deployment task of Fase 07 ("Ambiente de produção e deploy", `docs/project-plan.md`), out of scope for Phase 03 (TD-04 IC-5 revision). Rationale: IC-5.
 
 ---
 
@@ -148,7 +167,26 @@ _Inherited constraints (not reopened):_
 
 **Recommendation:** **Option A (client-driven init/complete)** — with presigned multipart the client must call `CompleteMultipartUpload` anyway. Routing that call through the API gives one deterministic point to verify the object and enqueue, with identical behavior on MinIO and S3. A cleanup policy for drafts that never complete is still needed. It can reuse the queue's delayed/scheduled jobs and does not need to be a separate TD.
 
-**Decision:** _[pending]_
+**Decision:** A (Client-driven init/complete endpoints)
+**Libraries:** —
+
+**Revisions:**
+- 2026-10-19 — Endpoint set is `init` / `complete` / `abort` (see TD-02); the multipart `upload_id` is persisted on the `videos` row; no resume / `ListParts` endpoint. Rationale: AMB-2.
+- 2026-10-19 — Draft row contents: the video belongs to a channel (FK `channel_id`; the owner is the authenticated user's channel); `title` comes from the `init` body and defaults to the original filename; the UUID primary key is used for the queue `jobId` and the storage keys, `public_id` (TD-10) only for the unique URL. Rationale: AMB-3.
+- 2026-10-19 — `complete` is idempotent: if the video is already `processing`, it re-enqueues with the same `jobId` (BullMQ dedup, TD-01), which recovers a lost enqueue; if it is `ready` or `failed`, it is a no-op/conflict per the error catalog. Rationale: AMB-6.
+- 2026-10-19 — Cleanup policy for abandoned uploads: the client calls `abort`; otherwise MinIO's default stale incomplete-multipart expiry (24h) removes the parts. Abandoned draft rows stay as `draft`. A dedicated cleanup job is out of scope for Phase 03 and is recorded as a separate future task. Rationale: MD-1.
+- 2026-10-19 — Endpoint set becomes `init` / re-sign / `complete` / `abort`, replacing the "no resume / `ListParts` endpoint" clause of the AMB-2 revision above. Re-sign (TD-02 IC-3 revision) works only on an existing `upload_id` of a `draft` video owned by the caller: it uses `ListParts` to return the uploaded parts (part number + `ETag`) and fresh public presigned URLs for the missing parts, and changes neither the row nor the queue. Rationale: IC-3.
+- 2026-10-19 — Out-of-state and failed-check responses, one rule. This fixes the "no-op/conflict per the error catalog" wording of the AMB-6 revisions here and on TD-01. `complete` on a `processing` video is still the idempotent re-enqueue (AMB-6). Every other out-of-state call returns **409** with the single video-state domain code `INVALID_VIDEO_STATE` (`InvalidVideoStateException`, same naming style as `nestjs-project/src/common/exceptions/domain.exception.ts`) and has no side effect: no state change, no enqueue, no S3 mutation. These calls are `complete` on `ready`/`failed`, `abort` on a non-`draft` video, re-sign on a non-`draft` video, and `complete` (or re-sign) after the multipart upload was aborted or expired (S3 `NoSuchUpload`). A failed completion check returns **422** with the domain code `UPLOAD_VERIFICATION_FAILED` (`UploadVerificationFailedException`). The check fails when the `HeadObject` `ContentLength` is above the configured max size or differs from the size declared at `init`. On that failure the upload is discarded and the row stays `draft`. Implementation note for plan-build: `HeadObject` runs after `CompleteMultipartUpload`, so at that point "aborting the multipart upload" means deleting the assembled source object. A later `complete`/re-sign on that `upload_id` then gets `NoSuchUpload` → 409 `INVALID_VIDEO_STATE`. Both codes go into the plan's Error Catalog (`phase-02-auth/TD-07`). Rationale: AMB-7.
+- 2026-10-19 — Scope of the abandoned-multipart expiry in the MD-1 revision: MinIO's default stale-upload expiry (24h, `MINIO_API_STALE_UPLOADS_EXPIRY`) is the policy for the Docker/MinIO environment of this phase. AWS S3 has no default expiry for incomplete multipart uploads. For production, an `AbortIncompleteMultipartUpload` bucket lifecycle rule is recorded as a production-deployment task that belongs to Fase 07 ("Ambiente de produção e deploy", `docs/project-plan.md`) and is out of scope for Phase 03. Until that rule exists, the "expired" branch (S3 `NoSuchUpload`) of the AMB-7 revision fires only on MinIO, which qualifies Option A's "Same behavior on MinIO and S3" Pro for abandoned uploads. Rationale: IC-5.
+- 2026-10-19 — Upload parameters persisted at `init`: the `videos` row also stores the size declared at `init` (bigint, bytes) and the part size used at `init` (bytes). Re-sign computes the missing parts as 1..ceil(persisted declared size / persisted part size), and the 422 `UPLOAD_VERIFICATION_FAILED` check compares `HeadObject` `ContentLength` with the persisted declared size; neither reads the current config for an open upload (`init` already rejects a declared size above the configured max). Rationale: AMB-8.
+- 2026-10-19 — Repeated `abort` is idempotent: `abort` on a `draft` video whose multipart upload is already gone (aborted earlier, expired, or discarded by a failed 422 check) ignores the S3 `NoSuchUpload` from `AbortMultipartUpload` and returns the same success response as the first `abort`; the row stays `draft`. `abort` on a non-`draft` video is still 409 `INVALID_VIDEO_STATE` (AMB-7 revision). Rationale: AMB-9.
+- 2026-10-19 — Unknown or non-owned video: re-sign, `complete` and `abort` return **404** with the domain code `VIDEO_NOT_FOUND` (`VideoNotFoundException`, same naming style as `nestjs-project/src/common/exceptions/domain.exception.ts`) both when the video does not exist and when it belongs to another channel, so the response does not reveal that the video exists (consistent with TD-10's unguessable identifiers). The existence/ownership check runs before the state check, so a non-owner never sees a 409. The code goes into the plan's Error Catalog (`phase-02-auth/TD-07`); stream/download follow the same rule (TD-11). Rationale: AMB-10.
+- 2026-10-19 — `complete` is retry-safe after a partial failure on a `draft` video. This refines the `NoSuchUpload` branch of the AMB-7 revision for `complete` only. If `CompleteMultipartUpload` returns S3 `NoSuchUpload` while the row is still `draft` (for example, the multipart upload was already completed but the following `HeadObject`, the transition to `processing` or the response failed), `complete` runs `HeadObject` on the source key `videos/{videoId}/source` (TD-03). If the object exists, `complete` continues with the normal completion check. It returns 422 `UPLOAD_VERIFICATION_FAILED`, discards the object and leaves the row `draft` when `ContentLength` is above the configured max or differs from the persisted declared size (AMB-7/AMB-8 revisions). Otherwise it moves the row to `processing` and enqueues with `jobId` = the video UUID (AMB-3/AMB-6 revisions). If the object does not exist (upload aborted, expired, or discarded by an earlier failed 422 check), the response stays 409 `INVALID_VIDEO_STATE` with no side effect. If the storage instead answers a repeated `CompleteMultipartUpload` with success, the normal path applies unchanged. Re-sign after `NoSuchUpload` is unchanged (409 `INVALID_VIDEO_STATE`). Rationale: AMB-11.
+- 2026-10-19 — External video identifier: the "video ID" that `init` returns and that re-sign, `complete` and `abort` take as their route param is the video's `public_id` (TD-10 AMB-12 revision), never the UUID primary key. The API resolves `public_id` → row (unique index) and then applies the AMB-10 existence/ownership check (404 `VIDEO_NOT_FOUND`). The UUID stays internal: storage keys (TD-03), queue `jobId` (TD-01) and FKs. Rationale: AMB-12.
+- 2026-10-20 — `abort` on a `draft` video also discards an already assembled source object. This refines the AMB-9 revision. After `AbortMultipartUpload` (whose S3 `NoSuchUpload` is still ignored), `abort` runs `DeleteObject` on the source key `videos/{videoId}/source` (TD-03). S3 `DeleteObject` succeeds on a missing key, so repeated `abort` stays idempotent and returns the same success response; the row stays `draft`. This covers the state reachable through the AMB-11 revision (multipart upload already completed, row still `draft`): after a successful `abort`, a later `complete` gets `NoSuchUpload`, `HeadObject` finds no object, and the response is 409 `INVALID_VIDEO_STATE` with no side effect. `abort` on a non-`draft` video is still 409 `INVALID_VIDEO_STATE`. Rationale: IC-6.
+- 2026-10-20 — The 422 `UPLOAD_VERIFICATION_FAILED` completion check has one condition: `HeadObject` `ContentLength` differs from the size persisted at `init` (AMB-8 revision). The configured max size is enforced only at `init`, which rejects a larger declared size, and is not re-read at `complete`. This replaces the "above the configured max size or" clause in the AMB-7 and AMB-11 revisions, so a config change between `init` and `complete` cannot fail an open upload. Rationale: IC-7 (auto-resolved per the user's standing instruction: the simplest option, consistent with AMB-8 and the existing `library-refs.md` snippet).
+- 2026-10-20 — Rejected parts list on `complete`: when `CompleteMultipartUpload` fails with S3 `InvalidPart` (wrong or missing ETag, part not uploaded), `InvalidPartOrder` or `EntityTooSmall` (a non-last part below the 5 MiB S3 minimum), `complete` returns **422** with the domain code `INVALID_UPLOAD_PARTS` (`InvalidUploadPartsException`, same naming style as `nestjs-project/src/common/exceptions/domain.exception.ts`) and has no side effect. The multipart upload stays open, the row stays `draft`, and nothing is enqueued, so the client can call re-sign (which returns the uploaded parts with their `ETag`s, IC-3 revision) and retry `complete`. This is distinct from 422 `UPLOAD_VERIFICATION_FAILED`, which discards the assembled object. The code goes into the plan's Error Catalog (`phase-02-auth/TD-07`). Rationale: AMB-13 (auto-resolved per the user's standing instruction: the simplest option that keeps the AMB-2 request body and the IC-3 resume path).
+- 2026-10-20 — Incomplete parts list on `complete`: before calling `CompleteMultipartUpload`, `complete` checks that the submitted part numbers are exactly 1..ceil(persisted declared size / persisted part size) (AMB-8 revision), each listed once. Otherwise it returns 422 `INVALID_UPLOAD_PARTS` with no side effect, as in the AMB-13 revision: the upload stays open, the row stays `draft`, and the client can re-sign and retry. This is needed because S3/MinIO accept a valid subset of parts and would assemble a smaller object that the IC-7 size check then discards. Rationale: AMB-14 (auto-resolved per the user's standing instruction: the option consistent with the AMB-13 intent and the IC-3 resume path).
 
 ---
 
@@ -174,7 +212,10 @@ _Inherited constraints (not reopened):_
 
 **Recommendation:** **Option B (two orthogonal fields)** — the plan already treats "rascunho → publicação" as its own Phase 04 flow. Keeping draft/publish separate from upload/processing avoids redefining an enum (and migrating data) one phase later. Option A is acceptable if the team prefers literal simplicity now and accepts that Phase 04 will have to revisit the enum.
 
-**Decision:** _[pending]_
+**Decision:** A (Single linear `status` enum: `draft` → `processing` → `ready` | `failed`)
+**Libraries:** —
+
+**Note:** Decision deliberately diverged from the Recommendation (Option B) — the single linear enum was chosen for literal adherence to the challenge acceptance criterion "rascunho → processando → pronto/erro". The cost already named in the Recommendation is accepted: Phase 04 will have to revisit the enum when publication is introduced.
 
 ---
 
@@ -205,7 +246,11 @@ _Inherited constraints (not reopened):_
 
 **Recommendation:** **Option A (bounded retries, then terminal `failed`, keep data)** — it uses the queue's built-in backoff and non-retryable error support (TD-01) and keeps the failure visible in the status model (TD-05). Storage cost stays bounded because only failed videos are kept, and they remain deletable.
 
-**Decision:** _[pending]_
+**Decision:** A (Bounded automatic retries, then terminal `failed`, keep data)
+**Libraries:** —
+
+**Revisions:**
+- 2026-10-19 — `failed` videos are retained (row + source object) for diagnosis. Video deletion is not part of the project plan's Phase 03 and is not introduced here, so the "they remain deletable" justification no longer applies; retention of failed videos is accepted. Rationale: DG-2.
 
 ---
 
@@ -236,7 +281,8 @@ _Inherited constraints (not reopened):_
 
 **Recommendation:** **Option A (same codebase, separate entrypoint and Compose service)** — it is the topology shown in the architecture diagram. It isolates FFmpeg load from the API and keeps one source of truth for entities and config. The only extra cost is a Compose service.
 
-**Decision:** _[pending]_
+**Decision:** A (Same codebase, separate entrypoint and Compose service)
+**Libraries:** —
 
 ---
 
@@ -262,7 +308,11 @@ _Inherited constraints (not reopened):_
 
 **Recommendation:** **Option A (system FFmpeg + spawn)** — with the only maintained high-level wrapper gone, both options need a spawn wrapper anyway. The distro package is the better-maintained binary source, and the worker already needs its own image setup (TD-07).
 
-**Decision:** _[pending]_
+**Decision:** A (System FFmpeg from the base image's package manager + `child_process.spawn`)
+**Libraries:** —
+
+**Revisions:**
+- 2026-10-19 — Persisted processing output: `duration_seconds` plus a `metadata` jsonb column holding width, height, video codec, container format, bitrate and size (from ffprobe). Thumbnail rule: JPEG of the frame at 10% of the duration, scaled to width 640 (stored as `videos/{videoId}/thumbnail.jpg`, TD-03). Rationale: AMB-4.
 
 ---
 
@@ -288,7 +338,11 @@ _Inherited constraints (not reopened):_
 
 **Recommendation:** **Option A (presigned GET with range reads)** — the phase only extracts metadata and one frame, so downloading up to 10GB per job is unnecessary. Range reads keep the worker container free of large scratch volumes. Option B is the fallback if real-world files show seek problems.
 
-**Decision:** _[pending]_
+**Decision:** A (Read through a short-lived presigned GET URL — HTTP range reads)
+**Libraries:** @aws-sdk/client-s3@^3.1153.0, @aws-sdk/s3-request-presigner@^3.1153.0
+
+**Revisions:**
+- 2026-10-19 — The presigned GET handed to ffprobe/ffmpeg is signed with the internal storage endpoint (`STORAGE_ENDPOINT`, e.g. `http://minio:9000`), never with the public one. Rationale: IC-1 — inside the `video-worker` container `localhost` is the container itself.
 
 ---
 
@@ -319,7 +373,12 @@ _Inherited constraints (not reopened):_
 
 **Recommendation:** **Option B (random short public ID)** — it gives the short URL the plan asks for and the unguessability that Phase 04's unlisted links need. It also keeps the internal UUID PK convention untouched, using only `node:crypto` and a unique index.
 
-**Decision:** _[pending]_
+**Decision:** B (Random short public ID in a unique column)
+**Libraries:** —
+
+**Revisions:**
+- 2026-10-19 — `public_id` is used only for the unique video URL; the UUID primary key stays the internal identifier for the queue `jobId` (TD-01) and the storage keys (TD-03). Rationale: AMB-3.
+- 2026-10-19 — `public_id` is the only external video identifier. It is generated at `init` and used in every video route param (re-sign, `complete`, `abort`, stream, download) and in every response that identifies a video, including the `init` response. The UUID primary key never leaves the API; it is used only internally for storage keys (TD-03), the queue `jobId` (TD-01) and foreign keys. This clarifies the AMB-3 revision above: "only for the unique URL" means `public_id` is never used as an internal key, not that the API exposes the UUID. Rationale: AMB-12.
 
 ---
 
@@ -350,7 +409,14 @@ _Inherited constraints (not reopened):_
 
 **Recommendation:** **Option A (presigned GET URLs issued by the API)** — it matches the C4 diagram (frontend streams from storage) and keeps playback bytes off both servers. Range/206 comes from the storage itself, and the API stays the point where visibility rules are enforced. Download is the same endpoint with an `attachment` disposition.
 
-**Decision:** _[pending]_
+**Decision:** A (API issues short-lived presigned GET URLs)
+**Libraries:** @aws-sdk/client-s3@^3.1153.0, @aws-sdk/s3-request-presigner@^3.1153.0
+
+**Revisions:**
+- 2026-10-19 — Playback/download URLs are signed with the public storage endpoint (`STORAGE_PUBLIC_ENDPOINT`, browser-reachable), distinct from the internal endpoint used server-side (TD-02). Rationale: IC-1.
+- 2026-10-19 — Access rules for Phase 03: stream and download are owner-only (authenticated user whose channel owns the video), because every video is still a draft; public access arrives with publication in a later phase. Only `ready` videos are servable. The endpoint returns the presigned GET URL (TTL 1h) in a JSON body — no redirect, which would make the BFF's `fetch` follow a 302 and pull the bytes through Next.js. The download URL is signed with `ResponseContentDisposition: attachment`. Rationale: AMB-5.
+- 2026-10-19 — Stream and download return **404** `VIDEO_NOT_FOUND` (`VideoNotFoundException`, TD-04 AMB-10 revision) both for an unknown video and for a video owned by another channel; existence is not revealed (TD-10). The existence/ownership check runs before the `ready` check. Rationale: AMB-10.
+- 2026-10-19 — The stream and download endpoints take the video's `public_id` as their route param (TD-10 AMB-12 revision), matching Option A's "resolved by public ID"; the UUID primary key is never accepted or returned. Rationale: AMB-12.
 
 ---
 
@@ -358,14 +424,14 @@ _Inherited constraints (not reopened):_
 
 | ID | Scope | Decision | Recommendation | Choice |
 |----|-------|----------|---------------|--------|
-| TD-01 | Backend | Message queue technology | A (BullMQ on Redis via `@nestjs/bullmq` 11.x) | _[pending]_ |
-| TD-02 | Cross-layer | Large-file upload protocol (10GB) | A (S3 multipart with presigned part URLs, direct to storage) | _[pending]_ |
-| TD-03 | Backend | Object storage layout | A (single private bucket, per-video prefix) | _[pending]_ |
-| TD-04 | Cross-layer | Draft pre-registration & upload-completion trigger | A (client-driven init/complete endpoints) | _[pending]_ |
-| TD-05 | Cross-layer | Video status lifecycle model | B (publication `status` + `processing_status`) | _[pending]_ |
-| TD-06 | Backend | Processing failure policy | A (bounded retries, then terminal `failed`, keep data) | _[pending]_ |
-| TD-07 | Backend | Video worker runtime topology | A (same codebase, separate entrypoint + Compose service) | _[pending]_ |
-| TD-08 | Backend | FFmpeg/ffprobe integration | A (system FFmpeg via apt + `child_process.spawn`) | _[pending]_ |
-| TD-09 | Backend | Worker access to the source video | A (presigned GET with HTTP range reads) | _[pending]_ |
-| TD-10 | Cross-layer | Unique video URL identifier | B (random short public ID, unique column) | _[pending]_ |
-| TD-11 | Cross-layer | Video delivery for streaming & download | A (presigned GET URLs issued by the API) | _[pending]_ |
+| TD-01 | Backend | Message queue technology | A (BullMQ on Redis via `@nestjs/bullmq` 11.x) | A (BullMQ on Redis) |
+| TD-02 | Cross-layer | Large-file upload protocol (10GB) | A (S3 multipart with presigned part URLs, direct to storage) | A (presigned S3 multipart, direct to storage) |
+| TD-03 | Backend | Object storage layout | A (single private bucket, per-video prefix) | A (single private bucket, per-video prefix) |
+| TD-04 | Cross-layer | Draft pre-registration & upload-completion trigger | A (client-driven init/complete endpoints) | A (client-driven init/complete/abort) |
+| TD-05 | Cross-layer | Video status lifecycle model | B (publication `status` + `processing_status`) | A (single linear `status` enum) — diverges from recommendation |
+| TD-06 | Backend | Processing failure policy | A (bounded retries, then terminal `failed`, keep data) | A (bounded retries, then `failed`, keep data) |
+| TD-07 | Backend | Video worker runtime topology | A (same codebase, separate entrypoint + Compose service) | A (same codebase, separate entrypoint + Compose service) |
+| TD-08 | Backend | FFmpeg/ffprobe integration | A (system FFmpeg via apt + `child_process.spawn`) | A (system FFmpeg via apt + spawn) |
+| TD-09 | Backend | Worker access to the source video | A (presigned GET with HTTP range reads) | A (presigned GET with range reads, internal endpoint) |
+| TD-10 | Cross-layer | Unique video URL identifier | B (random short public ID, unique column) | B (random short public ID) |
+| TD-11 | Cross-layer | Video delivery for streaming & download | A (presigned GET URLs issued by the API) | A (presigned GET URLs issued by the API, JSON, owner-only) |
