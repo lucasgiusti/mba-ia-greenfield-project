@@ -253,7 +253,7 @@ Nos testes de integração, as URLs "públicas" são assinadas com `STORAGE_PUBL
 ### SI-03.9 — Endpoint POST /videos (pré-cadastro do rascunho + início do multipart)
 
 **Route:** POST /videos
-**Test Specs:** _pending /plan-test-specs_
+**Test Specs:** see `nestjs-project/specs/videos-create.plan.md`
 **Authorization:** Authenticated (vídeo criado no canal do usuário)
 
 **Description:** Ao iniciar o upload, cria automaticamente o vídeo como rascunho no canal do usuário, abre o multipart S3 e devolve as URLs presigned de cada parte, para que até 10GB sigam direto do cliente ao storage.
@@ -292,7 +292,7 @@ _E2E rows omitted — os cenários HTTP desta rota ficam no spec gerado por `/pl
 ### SI-03.10 — Endpoint GET /videos/:publicId/upload (re-sign / retomada)
 
 **Route:** GET /videos/:publicId/upload
-**Test Specs:** _pending /plan-test-specs_
+**Test Specs:** see `nestjs-project/specs/videos-upload-resign.plan.md`
 **Authorization:** Owner
 
 **Description:** Permite retomar um upload de até 10GB após queda de conexão, reload ou expiração das URLs, devolvendo as partes já enviadas e URLs novas só para as faltantes, sem novo `init` e sem alterar linha nem fila.
@@ -329,7 +329,7 @@ _E2E rows omitted — os cenários HTTP desta rota ficam no spec gerado por `/pl
 ### SI-03.11 — Endpoint POST /videos/:publicId/upload/complete (verificação + disparo do processamento)
 
 **Route:** POST /videos/:publicId/upload/complete
-**Test Specs:** _pending /plan-test-specs_
+**Test Specs:** see `nestjs-project/specs/videos-upload-complete.plan.md`
 **Authorization:** Owner
 
 **Description:** Ponto determinístico em que a API conclui o multipart, verifica o objeto montado e dispara automaticamente o processamento em segundo plano após o upload, de forma idempotente e segura para retry.
@@ -367,7 +367,7 @@ _E2E rows omitted — os cenários HTTP desta rota ficam no spec gerado por `/pl
 ### SI-03.12 — Endpoint DELETE /videos/:publicId/upload (abort idempotente)
 
 **Route:** DELETE /videos/:publicId/upload
-**Test Specs:** _pending /plan-test-specs_
+**Test Specs:** see `nestjs-project/specs/videos-upload-abort.plan.md`
 **Authorization:** Owner
 
 **Description:** Permite ao cliente abandonar um upload em rascunho, liberando as partes e qualquer objeto já montado; o rascunho permanece `draft` e chamadas repetidas têm a mesma resposta.
@@ -489,7 +489,7 @@ _E2E rows omitted — os cenários HTTP desta rota ficam no spec gerado por `/pl
 ### SI-03.16 — Endpoint GET /videos/:publicId/stream (reprodução via streaming)
 
 **Route:** GET /videos/:publicId/stream
-**Test Specs:** _pending /plan-test-specs_
+**Test Specs:** see `nestjs-project/specs/videos-stream.plan.md`
 **Authorization:** Owner
 
 **Description:** Entrega ao dono uma URL presigned de curta duração do próprio storage, que atende `Range`/`206`, para reproduzir o vídeo sem download completo e sem os bytes passarem pela API nem pelo BFF.
@@ -524,7 +524,7 @@ _E2E rows omitted — os cenários HTTP desta rota ficam no spec gerado por `/pl
 ### SI-03.17 — Endpoint GET /videos/:publicId/download (download com disposition attachment)
 
 **Route:** GET /videos/:publicId/download
-**Test Specs:** _pending /plan-test-specs_
+**Test Specs:** see `nestjs-project/specs/videos-download.plan.md`
 **Authorization:** Owner
 
 **Description:** Permite ao dono baixar o vídeo pelo mesmo mecanismo do streaming, com a URL presigned forçando `Content-Disposition: attachment` e o nome original do arquivo.
