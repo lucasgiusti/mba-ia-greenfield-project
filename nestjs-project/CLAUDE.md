@@ -7,7 +7,7 @@
 After starting infrastructure, always confirm the containers are up before proceeding:
 
 ```bash
-docker compose ps   # all services must show status "running"
+docker compose ps   # all long-running services must show status "running"
 ```
 
 Then verify each infrastructure service is actually ready to accept connections — not just running:
@@ -83,8 +83,8 @@ npm run build                            # Compile to dist/
 npm run start:prod                       # Run compiled build
 npm run migration:run                    # Apply pending TypeORM migrations
 
-npm test                                 # Unit tests
-npm run test:watch                       # Unit tests in watch mode
+npm test                                 # Unit + integration tests
+npm run test:watch                       # Unit + integration tests in watch mode
 npm run test:cov                         # Coverage report
 npm run test:e2e                         # End-to-end tests (always with --runInBand)
 
@@ -181,7 +181,7 @@ Object storage has two endpoints: `STORAGE_ENDPOINT` (`http://minio:9000`) is us
 
 NestJS with standard module structure. Source lives in `src/`, compiled output in `dist/`.
 
-- Each domain feature gets its own module (e.g., `UsersModule`, `VideosModule`) registered in `AppModule`
+- Each domain feature gets its own module (e.g., `AuthModule`, `VideosModule`) registered in (or imported through) `AppModule`
 - `CoreModule` (`src/core/`) holds the shared infrastructure (Config, TypeORM, BullMQ connection) and is imported by both roots: `AppModule` (HTTP API, `src/main.ts`) and `WorkerModule` (video worker, `src/worker.ts`)
 - The queue consumer (`VideoProcessingModule`) is imported only by `WorkerModule`; the API only enqueues through `VideoQueueModule`
 - Controllers handle HTTP routing; Services hold business logic; both are scoped to their module
