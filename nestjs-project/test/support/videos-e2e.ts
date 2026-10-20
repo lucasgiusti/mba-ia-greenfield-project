@@ -12,6 +12,7 @@ import { DomainExceptionFilter } from '../../src/common/filters/domain-exception
 import { ValidationExceptionFilter } from '../../src/common/filters/validation-exception.filter';
 import { cleanAllTables } from '../../src/test/create-test-data-source';
 import { StorageService } from '../../src/storage/storage.service';
+import { useTestQueuePrefix } from '../../src/test/test-queue-prefix';
 import { videoSourceKey } from '../../src/storage/storage.keys';
 import { VIDEO_PROCESSING_QUEUE } from '../../src/video-processing/video-processing.constants';
 import { Video } from '../../src/videos/entities/video.entity';
@@ -32,9 +33,12 @@ export interface VideosE2eContext {
 
 /** Boots AppModule with the global config of main.ts (pipes + filters). */
 export async function createVideosE2eApp(): Promise<VideosE2eContext> {
-  const moduleFixture = await Test.createTestingModule({
-    imports: [AppModule],
-  }).compile();
+  // Test queue prefix: the video-worker container never consumes these jobs.
+  const moduleFixture = await useTestQueuePrefix(
+    Test.createTestingModule({
+      imports: [AppModule],
+    }),
+  ).compile();
 
   const app = moduleFixture.createNestApplication<INestApplication<App>>();
   app.useGlobalPipes(

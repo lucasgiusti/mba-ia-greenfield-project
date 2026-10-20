@@ -4,6 +4,7 @@ import { DiscoveryModule, DiscoveryService } from '@nestjs/core';
 import { WorkerHost, getQueueToken } from '@nestjs/bullmq';
 import type { Queue } from 'bullmq';
 import { CoreModule } from '../core/core.module';
+import { useTestQueuePrefix } from '../test/test-queue-prefix';
 import {
   VIDEO_PROCESSING_JOB,
   VIDEO_PROCESSING_QUEUE,
@@ -18,9 +19,11 @@ describe('VideoProcessingProducer (integration)', () => {
   let queue: Queue<VideoProcessingJobData>;
 
   beforeAll(async () => {
-    moduleRef = await Test.createTestingModule({
-      imports: [CoreModule, DiscoveryModule, VideoQueueModule],
-    }).compile();
+    moduleRef = await useTestQueuePrefix(
+      Test.createTestingModule({
+        imports: [CoreModule, DiscoveryModule, VideoQueueModule],
+      }),
+    ).compile();
     await moduleRef.init();
     producer = moduleRef.get(VideoProcessingProducer);
     queue = moduleRef.get(getQueueToken(VIDEO_PROCESSING_QUEUE));

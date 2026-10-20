@@ -24,14 +24,23 @@ import type {
   CompleteVideoUploadResponseDto,
 } from './dto/complete-video-upload.dto';
 import type { CreateVideoUploadDto } from './dto/create-video-upload.dto';
+import type { VideoDeliveryUrlResponseDto } from './dto/video-delivery-url-response.dto';
 import type {
   CreateVideoUploadResponseDto,
   ResignVideoUploadResponseDto,
   VideoUploadPartUrlDto,
 } from './dto/video-upload-response.dto';
-import { Video, VideoStatus } from './entities/video.entity';
+import {
+  Video,
+  type VideoMetadata,
+  VideoStatus,
+} from './entities/video.entity';
+import { buildAttachmentDisposition } from './content-disposition.util';
 import { generatePublicId } from './public-id.util';
-import { PUBLIC_ID_MAX_ATTEMPTS } from './videos.constants';
+import {
+  DELIVERY_URL_TTL_SECONDS,
+  PUBLIC_ID_MAX_ATTEMPTS,
+} from './videos.constants';
 
 const PG_UNIQUE_VIOLATION = '23505';
 const PUBLIC_ID_COLUMN = 'public_id';
@@ -246,6 +255,85 @@ export class VideosService {
     }
     // DeleteObject succeeds on a missing key, so a repeated abort stays idempotent.
     await this.storageService.deleteObject(key);
+  }
+
+  /**
+   * Playback: presigned GET of the source signed for STORAGE_PUBLIC_ENDPOINT;
+   * the storage answers Range requests, so bytes never pass through the API.
+   */
+  async getStreamUrl(
+    userId: string,
+    publicId: string,
+  ): Promise<VideoDeliveryUrlResponseDto> {
+    const video = await this.findReadyOwnedByPublicId(userId, publicId);
+    return {
+      url: await this.storageService.presignGetPublic(
+        videoSourceKey(video.id),
+        DELIVERY_URL_TTL_SECONDS,
+      ),
+      expires_in: DELIVERY_URL_TTL_SECONDS,
+    };
+  }
+
+  /**
+   * Download: same presigned GET as streaming, with the storage forcing
+   * `Content-Disposition: attachment` and the original file name.
+   */
+  async getDownloadUrl(
+    userId: string,
+    publicId: string,
+  ): Promise<VideoDeliveryUrlResponseDto> {
+    const video = await this.findReadyOwnedByPublicId(userId, publicId);
+    return {
+      url: await this.storageService.presignGetPublic(
+        videoSourceKey(video.id),
+        DELIVERY_URL_TTL_SECONDS,
+        buildAttachmentDisposition(video.original_filename),
+      ),
+      expires_in: DELIVERY_URL_TTL_SECONDS,
+    };
+  }
+
+  /** Worker entry point: the row only when it is still `processing`. */
+  async findProcessingById(id: string): Promise<Video | null> {
+    return this.videoRepository.findOne({
+      where: { id, status: VideoStatus.PROCESSING },
+    });
+  }
+
+  /** processing → ready; a no-op for any other state (re-run job). */
+  async markReady(
+    id: string,
+    result: { duration_seconds: number; metadata: VideoMetadata },
+  ): Promise<void> {
+    await this.videoRepository.update(
+      { id, status: VideoStatus.PROCESSING },
+      {
+        status: VideoStatus.READY,
+        duration_seconds: result.duration_seconds,
+        metadata: result.metadata,
+      },
+    );
+  }
+
+  /** processing → failed (terminal, row and source object kept); no-op otherwise. */
+  async markFailed(id: string): Promise<void> {
+    await this.videoRepository.update(
+      { id, status: VideoStatus.PROCESSING },
+      { status: VideoStatus.FAILED },
+    );
+  }
+
+  /** Ownership (404) before state (409): delivery requires `ready`. */
+  private async findReadyOwnedByPublicId(
+    userId: string,
+    publicId: string,
+  ): Promise<Video> {
+    const video = await this.findOwnedByPublicId(userId, publicId);
+    if (video.status !== VideoStatus.READY) {
+      throw new InvalidVideoStateException();
+    }
+    return video;
   }
 
   /** Part numbers must be exactly 1..partCount, each listed once. */

@@ -21,6 +21,15 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.dev
+    # Consumes the video-processing queue on `docker compose up -d`
+    # (the HTTP API in nestjs-api still starts idle).
+    command: ["npm", "run", "start:worker:dev"]
+    restart: unless-stopped
+    # docker-init (tini) relays SIGTERM to the whole process group, so the
+    # worker process (behind npm + nest --watch) runs its shutdown hooks.
+    init: true
+    environment:
+      TINI_KILL_PROCESS_GROUP: "1"
     volumes:
       - .:/home/node/app
     depends_on:

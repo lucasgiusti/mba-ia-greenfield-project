@@ -78,6 +78,7 @@ describe('VideosService', () => {
     abortMultipartUpload: jest.Mock;
     headObject: jest.Mock;
     deleteObject: jest.Mock;
+    presignGetPublic: jest.Mock;
   };
   let producer: { enqueue: jest.Mock };
   let upload: {
@@ -111,6 +112,12 @@ describe('VideosService', () => {
       abortMultipartUpload: jest.fn(),
       headObject: jest.fn(),
       deleteObject: jest.fn(),
+      presignGetPublic: jest.fn(
+        (key: string, ttl: number, disposition?: string) =>
+          Promise.resolve(
+            `http://public/${key}?ttl=${ttl}${disposition ? `&response-content-disposition=${encodeURIComponent(disposition)}` : ''}`,
+          ),
+      ),
     };
     producer = { enqueue: jest.fn().mockResolvedValue(undefined) };
     upload = {
@@ -545,6 +552,93 @@ describe('VideosService', () => {
         failure,
       );
       expect(storageService.deleteObject).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('getStreamUrl', () => {
+    it('should throw VideoNotFoundException for a non-owner before checking the state', async () => {
+      videoRepository.findOne.mockResolvedValue(
+        buildVideo({ channel_id: 'other-channel', status: VideoStatus.DRAFT }),
+      );
+
+      await expect(
+        service.getStreamUrl(USER_ID, PUBLIC_ID),
+      ).rejects.toBeInstanceOf(VideoNotFoundException);
+      expect(storageService.presignGetPublic).not.toHaveBeenCalled();
+    });
+
+    it.each([VideoStatus.DRAFT, VideoStatus.PROCESSING, VideoStatus.FAILED])(
+      'should throw InvalidVideoStateException for a %s video without signing a URL',
+      async (status) => {
+        videoRepository.findOne.mockResolvedValue(buildVideo({ status }));
+
+        await expect(
+          service.getStreamUrl(USER_ID, PUBLIC_ID),
+        ).rejects.toBeInstanceOf(InvalidVideoStateException);
+        expect(storageService.presignGetPublic).not.toHaveBeenCalled();
+      },
+    );
+
+    it('should sign the source key for 3600 s without a content disposition', async () => {
+      videoRepository.findOne.mockResolvedValue(
+        buildVideo({ status: VideoStatus.READY }),
+      );
+
+      const result = await service.getStreamUrl(USER_ID, PUBLIC_ID);
+
+      expect(storageService.presignGetPublic).toHaveBeenCalledWith(
+        SOURCE_KEY,
+        3600,
+      );
+      expect(result).toEqual({
+        url: `http://public/${SOURCE_KEY}?ttl=3600`,
+        expires_in: 3600,
+      });
+      expect(result.url).not.toContain('response-content-disposition');
+    });
+  });
+
+  describe('getDownloadUrl', () => {
+    it('should throw VideoNotFoundException for a non-owner before checking the state', async () => {
+      videoRepository.findOne.mockResolvedValue(
+        buildVideo({ channel_id: 'other-channel', status: VideoStatus.DRAFT }),
+      );
+
+      await expect(
+        service.getDownloadUrl(USER_ID, PUBLIC_ID),
+      ).rejects.toBeInstanceOf(VideoNotFoundException);
+      expect(storageService.presignGetPublic).not.toHaveBeenCalled();
+    });
+
+    it.each([VideoStatus.DRAFT, VideoStatus.PROCESSING, VideoStatus.FAILED])(
+      'should throw InvalidVideoStateException for a %s video without signing a URL',
+      async (status) => {
+        videoRepository.findOne.mockResolvedValue(buildVideo({ status }));
+
+        await expect(
+          service.getDownloadUrl(USER_ID, PUBLIC_ID),
+        ).rejects.toBeInstanceOf(InvalidVideoStateException);
+        expect(storageService.presignGetPublic).not.toHaveBeenCalled();
+      },
+    );
+
+    it('should pass the sanitized attachment disposition of the original file name to the storage', async () => {
+      videoRepository.findOne.mockResolvedValue(
+        buildVideo({
+          status: VideoStatus.READY,
+          original_filename: 'my "clip".mp4',
+        }),
+      );
+
+      const result = await service.getDownloadUrl(USER_ID, PUBLIC_ID);
+
+      expect(storageService.presignGetPublic).toHaveBeenCalledWith(
+        SOURCE_KEY,
+        3600,
+        'attachment; filename="my clip.mp4"',
+      );
+      expect(result.expires_in).toBe(3600);
+      expect(result.url).toContain('response-content-disposition=');
     });
   });
 });

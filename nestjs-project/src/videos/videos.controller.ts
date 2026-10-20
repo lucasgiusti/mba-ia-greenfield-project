@@ -26,6 +26,7 @@ import {
   CompleteVideoUploadResponseDto,
 } from './dto/complete-video-upload.dto';
 import { CreateVideoUploadDto } from './dto/create-video-upload.dto';
+import { VideoDeliveryUrlResponseDto } from './dto/video-delivery-url-response.dto';
 import {
   CreateVideoUploadResponseDto,
   ResignVideoUploadResponseDto,
@@ -193,5 +194,75 @@ export class VideosController {
     @Param('publicId') publicId: string,
   ): Promise<void> {
     await this.videosService.abortUpload(user.sub, publicId);
+  }
+
+  @Get(':publicId/stream')
+  @ApiBearerAuth('access-token')
+  @ApiParam(PUBLIC_ID_PARAM)
+  @ApiOperation({
+    summary: 'Get a streaming URL for a video',
+    description:
+      'Returns a short-lived presigned URL of the ready video owned by the caller, served directly by the storage with Range / 206 Partial Content support (no redirect; bytes never pass through the API).',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Presigned streaming URL',
+    type: VideoDeliveryUrlResponseDto,
+  })
+  @ApiResponse({
+    status: 401,
+    description: 'Missing or invalid access token',
+    schema: ERROR_ENVELOPE,
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Video not found or owned by another channel',
+    schema: ERROR_ENVELOPE,
+  })
+  @ApiResponse({
+    status: 409,
+    description: 'Video is not ready',
+    schema: ERROR_ENVELOPE,
+  })
+  async getStreamUrl(
+    @CurrentUser() user: JwtPayload,
+    @Param('publicId') publicId: string,
+  ): Promise<VideoDeliveryUrlResponseDto> {
+    return this.videosService.getStreamUrl(user.sub, publicId);
+  }
+
+  @Get(':publicId/download')
+  @ApiBearerAuth('access-token')
+  @ApiParam(PUBLIC_ID_PARAM)
+  @ApiOperation({
+    summary: 'Get a download URL for a video',
+    description:
+      'Returns a short-lived presigned URL of the ready video owned by the caller; the storage serves the whole file with `Content-Disposition: attachment` and the original file name.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Presigned download URL',
+    type: VideoDeliveryUrlResponseDto,
+  })
+  @ApiResponse({
+    status: 401,
+    description: 'Missing or invalid access token',
+    schema: ERROR_ENVELOPE,
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Video not found or owned by another channel',
+    schema: ERROR_ENVELOPE,
+  })
+  @ApiResponse({
+    status: 409,
+    description: 'Video is not ready',
+    schema: ERROR_ENVELOPE,
+  })
+  async getDownloadUrl(
+    @CurrentUser() user: JwtPayload,
+    @Param('publicId') publicId: string,
+  ): Promise<VideoDeliveryUrlResponseDto> {
+    return this.videosService.getDownloadUrl(user.sub, publicId);
   }
 }

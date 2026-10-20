@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { Test, type TestingModule } from '@nestjs/testing';
 import { getQueueToken } from '@nestjs/bullmq';
 import type { Queue } from 'bullmq';
@@ -19,9 +20,11 @@ import {
 } from '../storage/storage.errors';
 import { cleanAllTables } from '../test/create-test-data-source';
 import { putToPresignedUrl } from '../test/presigned-put';
+import { useTestQueuePrefix } from '../test/test-queue-prefix';
 import { User } from '../users/entities/user.entity';
 import { VIDEO_PROCESSING_QUEUE } from '../video-processing/video-processing.constants';
 import { Video, VideoStatus } from './entities/video.entity';
+import { generatePublicId } from './public-id.util';
 import { VideosModule } from './videos.module';
 import { VideosService } from './videos.service';
 
@@ -42,11 +45,19 @@ describe('VideosService (integration)', () => {
   let queue: Queue;
   const openUploads: { key: string; uploadId: string }[] = [];
 
+  const originalPublicEndpoint = process.env.STORAGE_PUBLIC_ENDPOINT;
+
   beforeAll(async () => {
-    moduleRef = await Test.createTestingModule({
-      // UsersModule registers User, required by the Channel#user relation.
-      imports: [CoreModule, UsersModule, VideosModule],
-    })
+    // Delivery URLs are fetched from inside the container: sign them for the
+    // Compose service instead of the browser host (read at compile time).
+    process.env.STORAGE_PUBLIC_ENDPOINT = 'http://minio:9000';
+    // Test queue prefix: the video-worker container never consumes these jobs.
+    moduleRef = await useTestQueuePrefix(
+      Test.createTestingModule({
+        // UsersModule registers User, required by the Channel#user relation.
+        imports: [CoreModule, UsersModule, VideosModule],
+      }),
+    )
       .overrideProvider(uploadConfig.KEY)
       .useValue(TEST_UPLOAD_CONFIG)
       .compile();
@@ -74,6 +85,7 @@ describe('VideosService (integration)', () => {
   afterAll(async () => {
     await queue?.obliterate({ force: true });
     await moduleRef?.close();
+    process.env.STORAGE_PUBLIC_ENDPOINT = originalPublicEndpoint;
   });
 
   let counter = 0;
@@ -331,6 +343,159 @@ describe('VideosService (integration)', () => {
           })),
         }),
       ).rejects.toBeInstanceOf(InvalidVideoStateException);
+    });
+  });
+
+  describe('worker state transitions', () => {
+    const METADATA = {
+      width: 320,
+      height: 240,
+      video_codec: 'h264',
+      container_format: 'mov,mp4,m4a,3gp,3g2,mj2',
+      bitrate: 400000,
+      size: 150000,
+    };
+
+    async function seedRow(status: VideoStatus): Promise<Video> {
+      const { channel } = await createUserWithChannel();
+      return videoRepository.save(
+        videoRepository.create({
+          public_id: generatePublicId(),
+          channel_id: channel.id,
+          title: 'clip.mp4',
+          original_filename: 'clip.mp4',
+          mime_type: 'video/mp4',
+          status,
+          declared_size: 150000,
+          part_size: PART_SIZE,
+        }),
+      );
+    }
+
+    it('should find a video by id only while it is processing', async () => {
+      const processing = await seedRow(VideoStatus.PROCESSING);
+      const ready = await seedRow(VideoStatus.READY);
+
+      await expect(
+        service.findProcessingById(processing.id),
+      ).resolves.toMatchObject({ id: processing.id });
+      await expect(service.findProcessingById(ready.id)).resolves.toBeNull();
+    });
+
+    it('should set ready with duration and metadata on a processing row', async () => {
+      const video = await seedRow(VideoStatus.PROCESSING);
+
+      await service.markReady(video.id, {
+        duration_seconds: 3.04,
+        metadata: METADATA,
+      });
+
+      const row = await videoRepository.findOneByOrFail({ id: video.id });
+      expect(row.status).toBe(VideoStatus.READY);
+      expect(row.duration_seconds).toBe(3.04);
+      expect(row.metadata).toEqual(METADATA);
+    });
+
+    it('should set failed on a processing row', async () => {
+      const video = await seedRow(VideoStatus.PROCESSING);
+
+      await service.markFailed(video.id);
+
+      const row = await videoRepository.findOneByOrFail({ id: video.id });
+      expect(row.status).toBe(VideoStatus.FAILED);
+    });
+
+    it.each([VideoStatus.DRAFT, VideoStatus.READY, VideoStatus.FAILED])(
+      'should not change a %s row with markReady or markFailed',
+      async (status) => {
+        const video = await seedRow(status);
+        const before = await videoRepository.findOneByOrFail({ id: video.id });
+
+        await service.markReady(video.id, {
+          duration_seconds: 9,
+          metadata: METADATA,
+        });
+        await service.markFailed(video.id);
+
+        await expect(
+          videoRepository.findOneByOrFail({ id: video.id }),
+        ).resolves.toEqual(before);
+      },
+    );
+  });
+
+  describe('getStreamUrl', () => {
+    const SOURCE_BYTES = randomBytes(4096);
+
+    it('should return a public-endpoint URL that the storage serves with 206 for a Range request', async () => {
+      const { user, channel } = await createUserWithChannel();
+      const video = await videoRepository.save(
+        videoRepository.create({
+          public_id: generatePublicId(),
+          channel_id: channel.id,
+          title: 'clip.mp4',
+          original_filename: 'clip.mp4',
+          mime_type: 'video/mp4',
+          status: VideoStatus.READY,
+          declared_size: SOURCE_BYTES.length,
+          part_size: PART_SIZE,
+        }),
+      );
+      const key = videoSourceKey(video.id);
+      await storage.putObject(key, SOURCE_BYTES, 'video/mp4');
+
+      try {
+        const result = await service.getStreamUrl(user.id, video.public_id);
+
+        expect(result.expires_in).toBe(3600);
+        expect(new URL(result.url).host).toBe('minio:9000');
+        const response = await fetch(result.url, {
+          headers: { Range: 'bytes=0-1023' },
+        });
+        expect(response.status).toBe(206);
+        expect(response.headers.get('content-range')).toBe(
+          `bytes 0-1023/${SOURCE_BYTES.length}`,
+        );
+        const body = Buffer.from(await response.arrayBuffer());
+        expect(body).toEqual(SOURCE_BYTES.subarray(0, 1024));
+      } finally {
+        await storage.deleteObject(key);
+      }
+    });
+  });
+
+  describe('getDownloadUrl', () => {
+    it('should return a URL that the storage serves in full as an attachment named after the original file', async () => {
+      const bytes = randomBytes(4096);
+      const { user, channel } = await createUserWithChannel();
+      const video = await videoRepository.save(
+        videoRepository.create({
+          public_id: generatePublicId(),
+          channel_id: channel.id,
+          title: 'My clip',
+          original_filename: 'clip.mp4',
+          mime_type: 'video/mp4',
+          status: VideoStatus.READY,
+          declared_size: bytes.length,
+          part_size: PART_SIZE,
+        }),
+      );
+      const key = videoSourceKey(video.id);
+      await storage.putObject(key, bytes, 'video/mp4');
+
+      try {
+        const result = await service.getDownloadUrl(user.id, video.public_id);
+
+        expect(result.expires_in).toBe(3600);
+        const response = await fetch(result.url);
+        expect(response.status).toBe(200);
+        expect(response.headers.get('content-disposition')).toBe(
+          'attachment; filename="clip.mp4"',
+        );
+        expect(Buffer.from(await response.arrayBuffer())).toEqual(bytes);
+      } finally {
+        await storage.deleteObject(key);
+      }
     });
   });
 });

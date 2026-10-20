@@ -1,7 +1,7 @@
 # phase-03-videos — Progress
 
 **Status:** in_progress
-**SIs:** 12/20 completed
+**SIs:** 17/20 completed
 
 ### SI-03.1 — Tornar o harness de migrations re-executável
 - **Status:** completed
@@ -112,29 +112,51 @@
   - **Session check after SI-03.12 (out of scope, follow-up):** `npm run test:e2e` as defined in package.json (`jest --config ./test/jest-e2e.json`) does NOT run in band, contrary to nestjs-project/CLAUDE.md ("already configured"). With 7 e2e suites sharing one DB it fails (25 failed / 48 passed: FK violations in `cleanAllTables`, cross-suite contamination). `npm run test:e2e -- --runInBand` → 7 suites / 73 tests green. Fixed in this phase: `--runInBand` added to the `test:e2e` script (the new Phase 03 e2e suites are what made the parallel run break; aligns the script with nestjs-project/CLAUDE.md) → `npm run test:e2e` 7 suites / 73 tests green. Same session: `npm test -- --runInBand` 34 suites / 247 tests green; `tsc --noEmit` clean; `npm run lint` 0 errors (1 pre-existing warning in auth.service.integration-spec.ts).
 
 ### SI-03.13 — FfmpegService (wrapper tipado de ffprobe/ffmpeg via spawn) e gerador de vídeo de teste
-- **Status:** pending
-- **Tests:** —
-- **Observations:** none
+- **Status:** completed
+- **Tests:** 8 passing (ffmpeg.service.integration-spec.ts: probe 3, extractFrame 1, over presigned internal URL 4)
+- **Observations:**
+  - `ffmpeg -h protocol=http` in the image (FFmpeg 5.1.9) confirms `reconnect`, `reconnect_on_network_error`, `reconnect_delay_max` (and `seekable`, `multiple_requests`); `extractFrame` adds `-reconnect 1 -reconnect_on_network_error 1 -reconnect_delay_max 5` before `-i` only for http(s) inputs. Both invocations also pass `-v error` (and ffmpeg `-y` to overwrite the output path); no other options.
+  - Error split (action 3 says non-zero ffprobe → `MediaNotDecodableError` but HTTP failure → `FfmpegExecutionError`; TD-09 wants network failures retried): for an http(s) input, a non-zero ffprobe exit is `MediaNotDecodableError` only when stderr shows a demux failure (`Invalid data found when processing input` / `moov atom not found`); any other HTTP failure (403, DNS, connection refused — stderr verified in the image) is `FfmpegExecutionError` (retryable). Local inputs: any non-zero exit is `MediaNotDecodableError`. Spawn failures and non-zero ffmpeg exits are `FfmpegExecutionError` with stderr. A probe output without a video stream or without `format.duration` is `MediaNotDecodableError`.
+  - `generateTestVideo` encodes lavfi `testsrc` with libx264 (`-preset ultrafast -pix_fmt yuv420p`) and reaches the target size (`minSizeBytes`) deterministically by appending a trailing top-level ISO BMFF `free` box (a valid MP4; ffprobe reports `format.size` = file size). `generateRandomBytesFile` writes random bytes for the not-decodable path.
+  - Extra tests beyond the table: extractFrame over the presigned internal URL (exercises the HTTP reconnect options), random bytes over HTTP → `MediaNotDecodableError`, 403 over HTTP → `FfmpegExecutionError`, probe of a missing local path.
 
 ### SI-03.14 — Processamento do vídeo: VideoProcessingService e VideoProcessingConsumer
-- **Status:** pending
-- **Tests:** —
-- **Observations:** none
+- **Status:** completed
+- **Tests:** 22 passing — video-processing.service.spec 6, video-processing.service.integration-spec 3, video-processing.consumer.spec 7, videos.service.integration-spec 6 new (worker state transitions); the 15 earlier tests of videos.service.integration-spec still green
+- **Observations:**
+  - `markReady`/`markFailed` are `UPDATE ... WHERE id = :id AND status = 'processing'` (no-op for any other state); `findProcessingById` returns the row only while `processing`, so a re-run job of a `ready`/`failed` video exits before touching storage/FFmpeg.
+  - `VideoProcessingService.process` re-throws `FfmpegExecutionError` and storage errors unchanged (retryable through the queue's `attempts: 3` + exponential backoff from SI-03.8); only `MediaNotDecodableError` becomes `UnrecoverableError`. The JPEG is written to `os.tmpdir()/thumbnail-<uuid>-<random>.jpg`, read into memory for `PutObject` and removed in `finally`.
+  - `onFailed` treats as terminal `err instanceof UnrecoverableError` (or `err.name === 'UnrecoverableError'`) or `job.attemptsMade >= job.opts.attempts` (BullMQ increments `attemptsMade` before emitting `failed`); intermediate failures are logged as warnings; a `markFailed` error is logged, never re-thrown; a `failed` event without a job is only logged.
+  - The service integration spec builds `CoreModule + UsersModule + VideosModule + StorageModule` with `FfmpegService`/`VideoProcessingService` as local providers (no `VideoProcessingConsumer`, nothing enqueued), so it is independent of any queue consumer, including the `video-worker` container from SI-03.15.
 
 ### SI-03.15 — Entrypoint do worker e wiring do container video-worker
-- **Status:** pending
-- **Tests:** —
-- **Observations:** none
+- **Status:** completed
+- **Tests:** 4 passing (worker.module.integration-spec.ts); with the `video-worker` container consuming: SI-03.8–03.15 queue-related integration suites 54/54 and `npm run test:e2e` 7 suites / 73 tests green (run twice)
+- **Observations:**
+  - `WorkerModule` imports `CoreModule`, `UsersModule` and `VideoProcessingModule`. `UsersModule` (no controllers) is the smallest fix for the `Channel#user` relation (needs `User` registered, as noted in SI-03.9); no `AuthModule`. `VideosModule` brings `VideosController` into the graph, but `createApplicationContext` mounts no HTTP routes and opens no port (only Docker's embedded DNS socket is listening in the container).
+  - `worker.ts` = `createApplicationContext(WorkerModule)` + `enableShutdownHooks()`; it also awaits `worker.waitUntilReady()` and logs `Video worker connected to Redis, consuming queue "video-processing"`, and logs `Video worker closed` on the BullMQ worker `closed` event (visible in `docker compose logs video-worker`).
+  - **Test determinism with the container worker:** the container worker and the test processes share Redis/DB/MinIO, so a job enqueued by a test (complete e2e/integration) could be consumed by the container and flip `processing` rows to `ready`/`failed` (and `failed` makes a repeated `complete` 409) — a real race. Fix: new test helper `src/test/test-queue-prefix.ts` (`useTestQueuePrefix(builder)`) overrides the root BullMQ shared config (`getSharedConfigToken()`) with `prefix: 'bull-test'`; applied in `video-processing.producer.integration-spec.ts`, `videos.service.integration-spec.ts`, `test/support/videos-e2e.ts` and the new worker spec. The container worker consumes only the default `bull` prefix, so test jobs are never seen by it. No production code/config changed for this. SI-03.14's processing integration spec calls `VideoProcessingService` directly (nothing enqueued). Any future test that needs a consumer (SI-03.18) must start its own in-process `WorkerModule` with `useTestQueuePrefix`.
+  - The worker integration spec boots `WorkerModule` through `Test.createTestingModule(...).compile()` + `init()` (a `NestApplicationContext`, same lifecycle as `createApplicationContext`) instead of `NestFactory.createApplicationContext`, because the test prefix override needs the testing builder; it asserts the consumer's worker runs on `video-processing` with concurrency 1, consumes a job (unknown video → completed, no effect), and is no longer running after `close()`; plus `AppModule` has no `VideoProcessingConsumer`.
+  - **AC verified manually:** `docker compose up -d` starts `video-worker` running `npm run start:worker:dev` (logs show the connected/consuming line). A real flow on the default prefix (initUpload → 2 presigned part PUTs of a 6 MiB generated MP4 → completeUpload) went `processing` → `ready` in ~200 ms through the container worker, with `metadata` filled and `videos/{id}/thumbnail.jpg` (image/jpeg) stored; verification data deleted afterwards. The API process (`nestjs-api`) stays idle and AppModule has no consumer.
+  - **Shutdown (deviation, compose):** with only `command` + `restart`, `docker compose stop video-worker` never ran the shutdown hooks: SIGTERM reaches npm (PID 1) → the Nest CLI watch process dies without signalling its child (it only tree-kills on a normal `exit`), and the app is SIGKILLed when PID 1 exits. Added `init: true` + `TINI_KILL_PROCESS_GROUP: "1"` so docker-init relays SIGTERM to the whole process group and the worker process runs `onApplicationShutdown` (`Video worker closed` logged). In dev watch mode this is still best-effort (2 of 3 stops logged the close; the npm → nest CLI chain can exit, and take the container down, before the async close finishes); jobs interrupted that way are recovered by BullMQ stalled-job detection (at-least-once, TD-01). The prod entrypoint is deterministic: `node dist/worker` as the container process logged `Video worker closed` on 3/3 `docker stop` (exit 143 = SIGTERM re-raised after the hooks).
+  - Dev watch note: `nest start --watch` in `video-worker` and a manual `start:dev` in `nestjs-api` share `dist/` through the bind mount and `deleteOutDir: true`; each start re-emits the whole project, so they converge, but a start of one briefly deletes the other's `dist/`. Any new `.ts` file at the project root also triggers a worker rebuild (tsconfig default include).
 
 ### SI-03.16 — Endpoint GET /videos/:publicId/stream (reprodução via streaming)
-- **Status:** pending
-- **Tests:** —
-- **Observations:** none
+- **Status:** completed
+- **Tests:** 9 passing — videos.service.spec 5 new (getStreamUrl), videos.service.integration-spec 1 new, test/videos-stream.e2e-spec.ts 3 (spec-derived); the rest of both service suites still green (57 total)
+- **Observations:**
+  - The 404 → 409 rule lives in a private `findReadyOwnedByPublicId` (reused by download in SI-03.17); `getStreamUrl` calls `presignGetPublic(videoSourceKey(id), DELIVERY_URL_TTL_SECONDS)` with no disposition.
+  - `VideoDeliveryUrlResponseDto` is in `src/videos/dto/video-delivery-url-response.dto.ts`.
+  - `videos.service.integration-spec.ts` now sets `STORAGE_PUBLIC_ENDPOINT=http://minio:9000` before compiling (restored in `afterAll`), as the SI's Tests row asks, so the returned URL is fetched directly; the existing part-URL host assertion reads the env at run time and the presigned-put helper keeps working with that host.
+  - The e2e fixture follows the spec (POST /videos 4096 bytes → PUT → complete → status set on the row); its complete enqueues under the test queue prefix, so the `video-worker` container never changes the row during the test.
 
 ### SI-03.17 — Endpoint GET /videos/:publicId/download (download com disposition attachment)
-- **Status:** pending
-- **Tests:** —
-- **Observations:** none
+- **Status:** completed
+- **Tests:** 12 passing — content-disposition.util.spec 4, videos.service.spec 5 new (getDownloadUrl), videos.service.integration-spec 1 new, test/videos-download.e2e-spec.ts 2 (spec-derived)
+- **Observations:**
+  - `buildAttachmentDisposition` strips C0 controls (U+0000–U+001F), DEL, `"` and `\` and keeps everything else (spaces, accents); it adds no fallback for a name that becomes empty (not in the plan; the DTO already requires a non-empty `filename`).
+  - `getDownloadUrl` reuses the private `findReadyOwnedByPublicId` from SI-03.16 (404 before 409) and passes the disposition as `presignGetPublic`'s third argument (`ResponseContentDisposition`); MinIO returns `Content-Disposition: attachment; filename="clip.mp4"` and the full body (integration + e2e).
+  - **Session check after SI-03.17 (video-worker container running and consuming):** `npm test -- --runInBand` 40 suites / 297 tests green; `npm run test:e2e` 9 suites / 78 tests green; `tsc --noEmit` exit 0; `npm run lint` 0 errors (1 pre-existing warning in auth.service.integration-spec.ts). The container worker logged no processing of test jobs.
 
 ### SI-03.18 — Verificação ponta a ponta do ciclo upload → processamento → streaming/download
 - **Status:** pending
