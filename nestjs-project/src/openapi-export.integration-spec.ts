@@ -128,4 +128,130 @@ describe('exportSpec (integration)', () => {
       }
     }
   });
+
+  describe('video endpoints', () => {
+    const apiErrorRef = '#/components/schemas/ApiErrorEnvelope';
+    const videoOperations: Array<{
+      path: string;
+      method: string;
+      success: string;
+      errors: string[];
+    }> = [
+      {
+        path: '/videos',
+        method: 'post',
+        success: '201',
+        errors: ['400', '401'],
+      },
+      {
+        path: '/videos/{publicId}/upload',
+        method: 'get',
+        success: '200',
+        errors: ['401', '404', '409'],
+      },
+      {
+        path: '/videos/{publicId}/upload',
+        method: 'delete',
+        success: '204',
+        errors: ['401', '404', '409'],
+      },
+      {
+        path: '/videos/{publicId}/upload/complete',
+        method: 'post',
+        success: '202',
+        errors: ['400', '401', '404', '409', '422'],
+      },
+      {
+        path: '/videos/{publicId}/stream',
+        method: 'get',
+        success: '200',
+        errors: ['401', '404', '409'],
+      },
+      {
+        path: '/videos/{publicId}/download',
+        method: 'get',
+        success: '200',
+        errors: ['401', '404', '409'],
+      },
+    ];
+
+    const operationOf = (path: string, method: string) => {
+      const paths = document.paths as Record<
+        string,
+        Record<string, Record<string, unknown>>
+      >;
+      return paths[path]?.[method];
+    };
+
+    it('exposes exactly the expected methods on each video path', () => {
+      const paths = document.paths as Record<string, Record<string, unknown>>;
+      const videoPaths = Object.keys(paths)
+        .filter((p) => p === '/videos' || p.startsWith('/videos/'))
+        .sort();
+      expect(videoPaths).toEqual([
+        '/videos',
+        '/videos/{publicId}/download',
+        '/videos/{publicId}/stream',
+        '/videos/{publicId}/upload',
+        '/videos/{publicId}/upload/complete',
+      ]);
+
+      for (const path of videoPaths) {
+        const expected = videoOperations
+          .filter((op) => op.path === path)
+          .map((op) => op.method)
+          .sort();
+        expect(Object.keys(paths[path]).sort()).toEqual(expected);
+      }
+    });
+
+    it.each(videoOperations)(
+      '$method $path is tagged "videos" and requires access-token',
+      ({ path, method }) => {
+        const operation = operationOf(path, method);
+        expect(operation).toBeDefined();
+        expect(operation?.tags).toEqual(['videos']);
+        const security = operation?.security as Array<Record<string, unknown>>;
+        expect(security).toBeDefined();
+        expect(security.some((req) => 'access-token' in req)).toBe(true);
+      },
+    );
+
+    it.each(videoOperations)(
+      '$method $path documents exactly its success and error statuses',
+      ({ path, method, success, errors }) => {
+        const responses = operationOf(path, method)?.responses as Record<
+          string,
+          unknown
+        >;
+        expect(Object.keys(responses).sort()).toEqual(
+          [success, ...errors].sort(),
+        );
+      },
+    );
+
+    it.each(videoOperations)(
+      '$method $path error responses reference ApiErrorEnvelope',
+      ({ path, method, errors }) => {
+        const responses = operationOf(path, method)?.responses as Record<
+          string,
+          Record<string, unknown>
+        >;
+        for (const status of errors) {
+          const content = responses[status].content as Record<
+            string,
+            Record<string, unknown>
+          >;
+          const schema = content?.['application/json']?.schema as Record<
+            string,
+            unknown
+          >;
+          expect({ status, ref: schema?.['$ref'] }).toEqual({
+            status,
+            ref: apiErrorRef,
+          });
+        }
+      },
+    );
+  });
 });
